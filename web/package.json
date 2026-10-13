@@ -1,0 +1,13 @@
+{
+  "name": "epeaky-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "./build.sh dist",
+    "test": "./build.sh dist >/dev/null && node --test tests/*.test.js",
+    "e2e": "node tests/den.e2e.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1"
+  }
+}

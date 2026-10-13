@@ -1,0 +1,9 @@
+_build
+deps
+*.db*
+tmp
+priv/keys
+test
+native/den_public/target
+priv/native
+priv/blobs
