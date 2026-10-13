@@ -33,6 +33,11 @@ defmodule Den.Rooms do
       field :last_committer, :string
       field :last_commit_at, :utc_datetime
       field :info_epoch, :integer
+      # Set by moderators (Den.Mod.room_save/3).
+      field :slow_seconds, :integer, default: 0
+      field :post_roles, :string
+      field :topic, :string
+      field :position, :integer
       timestamps(type: :utc_datetime)
     end
   end
@@ -68,10 +73,13 @@ defmodule Den.Rooms do
     end
   end
 
-  @doc "Make the configured rooms if they are not there."
+  @doc "Make the configured rooms if they are not there (a moderator's name for one stays)."
   def seed do
+    named = Repo.all(from s in "settings", where: like(s.key, "named:%"), select: s.key)
+
     for {id, title} <- Application.fetch_env!(:den, :rooms) do
-      Repo.insert!(%Room{id: id, title: title}, on_conflict: [set: [title: title]], conflict_target: :id)
+      conflict = if "named:" <> id in named, do: :nothing, else: [set: [title: title]]
+      Repo.insert!(%Room{id: id, title: title}, on_conflict: conflict, conflict_target: :id)
     end
 
     :ok
@@ -80,7 +88,40 @@ defmodule Den.Rooms do
   def get(id), do: Repo.get(Room, id)
 
   @doc "The rooms any member sees: open and proposal rooms. Private ones are known only to their members."
-  def listed, do: Repo.all(from r in Room, where: r.kind != "private", order_by: [r.inserted_at, r.id], select: %{id: r.id, title: r.title, kind: r.kind})
+  def listed, do: Repo.all(from r in Room, where: r.kind != "private", order_by: [fragment("coalesce(?, 1000000)", r.position), r.inserted_at, r.id]) |> Enum.map(&public/1)
+
+  @doc "An open room as members see it: its name and the settings moderators gave it."
+  def public(%Room{} = r) do
+    fixed = Enum.any?(Application.fetch_env!(:den, :rooms), fn {id, _} -> id == r.id end)
+    %{id: r.id, title: r.title, kind: r.kind, topic: r.topic || "", slow: r.slow_seconds || 0, post_roles: String.split(r.post_roles || "", ",", trim: true), position: r.position, fixed: fixed}
+  end
+
+  @doc "A moderator deletes an open room the host did not name, its words with it."
+  def delete_room(id) do
+    seeded = for {rid, _} <- Application.fetch_env!(:den, :rooms), do: rid
+
+    case get(id) do
+      %Room{kind: "open"} ->
+        if id in seeded, do: {:error, :seeded}, else: drop_room(id)
+
+      _ ->
+        {:error, :room}
+    end
+  end
+
+  defp drop_room(id) do
+    # Its channels and voice close: nobody in it keeps writing to nothing.
+    DenWeb.Endpoint.broadcast("room:" <> id, "members", %{keys: []})
+    DenWeb.Endpoint.broadcast("voice:" <> id, "members", %{keys: []})
+
+    Repo.transaction(fn ->
+      Repo.delete_all(from m in Message, where: m.room == ^id)
+      Repo.delete_all(from rd in RoomDevice, where: rd.room == ^id)
+      Repo.delete_all(from r in Room, where: r.id == ^id)
+    end)
+
+    :ok
+  end
 
   @doc "A room a member names, open to all members."
   def open_room(title) do
@@ -184,7 +225,8 @@ defmodule Den.Rooms do
       _ -> []
     end
     admitted = if keys == [], do: [], else: Repo.all(from d in Device, where: d.key in ^keys and d.until > ^now, select: d.key)
-    Enum.uniq(seated ++ admitted)
+    # A kicked or banned device is gone too: any member's page takes it out.
+    Enum.uniq(seated ++ admitted) |> Enum.reject(&Den.Mod.out?/1)
   end
 
   @doc """
@@ -245,7 +287,7 @@ defmodule Den.Rooms do
     with {:ok, env} <- Den.Mls.envelope(bytes),
          true <- env.room == room || {:error, :wrong_room} do
       Repo.transaction(fn ->
-        r = Repo.get!(Room, room)
+        r = Repo.get(Room, room) || Repo.rollback(:no_room)
 
         cond do
           r.kind == "private" and env.external ->
@@ -268,9 +310,13 @@ defmodule Den.Rooms do
             # device whose session sent it: no commit-shaped bytes, and no
             # commits in another device's name.
             case Den.Public.commit(r.public_state, bytes) do
-              {:ok, {state, epoch, ^sender}} when epoch == r.epoch + 1 ->
-                if byte_size(state) > state_max() or length(public_members(state, r.id)) > members_max(), do: Repo.rollback(:too_big), else: order(r, env, bytes, epoch, state, sender)
-              {:ok, {_, _, _}} -> Repo.rollback(:not_yours)
+              {:ok, {state, epoch, ^sender, removed}} when epoch == r.epoch + 1 ->
+                cond do
+                  byte_size(state) > state_max() or length(public_members(state, r.id)) > members_max() -> Repo.rollback(:too_big)
+                  r.kind != "private" and not Enum.all?(removed, &may_remove?(sender, &1)) -> Repo.rollback(:may_not_remove)
+                  true -> order(r, env, bytes, epoch, state, sender)
+                end
+              {:ok, {_, _, _, _}} -> Repo.rollback(:not_yours)
               {:error, why} -> Repo.rollback({:bad_commit, why})
             end
 
@@ -368,6 +414,21 @@ defmodule Den.Rooms do
     end
   end
 
+  # Who may take a member out of an open room: itself (a rejoin replacing
+  # its old seat); anyone, a device whose day ended or that was kicked or
+  # banned (members' pages do that housekeeping); otherwise only a device
+  # allowed to kick, above it. In a private room its members decide.
+  defp may_remove?(sender, key) do
+    key == sender or not live?(key) or Den.Mod.out?(key) or (Den.Mod.can?(sender, "kick") and Den.Mod.above?(sender, key))
+  end
+
+  defp live?(key) do
+    case device_until(key) do
+      %DateTime{} = until -> DateTime.compare(until, DateTime.utc_now()) == :gt
+      _ -> false
+    end
+  end
+
   defp barred?(room, key), do: Repo.exists?(from b in "barred", where: b.room == ^room and b.key == ^key and b.until > ^now())
 
   defp signed?(key, msg, sig_hex) do
@@ -378,6 +439,34 @@ defmodule Den.Rooms do
       _ -> false
     end
   end
+
+  @doc """
+  A kicked or banned device: its connections drop, and every open room it is
+  a member of is told to take it out (members' pages do, by commit).
+  """
+  def expel(key) do
+    DenWeb.Endpoint.broadcast("device:" <> key, "disconnect", %{})
+    unvoice(key)
+
+    for r <- Repo.all(from r in Room, where: r.kind != "private" and not is_nil(r.public_state)), key in members(r) do
+      DenWeb.Endpoint.broadcast("room:" <> r.id, "expired", %{keys: [key]})
+    end
+
+    :ok
+  end
+
+  @doc "A timed-out (or removed) device leaves every voice room it is in."
+  def unvoice(key), do: DenWeb.Endpoint.broadcast("voice-device:" <> key, "stop", %{})
+
+  @doc "A moderator deletes one message (never a commit) by its number."
+  def delete_message(room, seq) when is_integer(seq) do
+    case Repo.delete_all(from m in Message, where: m.room == ^room and m.seq == ^seq and m.commit == false) do
+      {1, _} -> :ok
+      _ -> {:error, :no_message}
+    end
+  end
+
+  def delete_message(_, _), do: {:error, :no_message}
 
   @doc "Messages after `seq`, oldest first."
   def since(room, seq, limit \\ 500) do
