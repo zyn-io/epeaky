@@ -66,10 +66,10 @@ if v = System.get_env("DEN_LIMITS") do
     for pair <- list.(v), into: %{} do
       with [k, n] <- String.split(pair, "=", parts: 2),
            {n, ""} <- Integer.parse(String.trim(n)),
-           key when is_atom(key) <- Enum.find([:message_bytes, :file_bytes, :files, :invites, :inbox, :history_bytes, :min_free_bytes], &(Atom.to_string(&1) == String.trim(k))) do
+           key when is_atom(key) <- Enum.find([:message_bytes, :file_max, :file_bytes, :files, :room_members, :invites, :inbox, :history_bytes, :min_free_bytes], &(Atom.to_string(&1) == String.trim(k))) do
         {key, n}
       else
-        _ -> raise "DEN_LIMITS: #{inspect(pair)} is not name=number (message_bytes, file_bytes, files, invites, inbox, history_bytes, min_free_bytes)"
+        _ -> raise "DEN_LIMITS: #{inspect(pair)} is not name=number (message_bytes, file_max, file_bytes, files, room_members, invites, inbox, history_bytes, min_free_bytes)"
       end
     end
 
@@ -78,8 +78,19 @@ end
 
 if v = System.get_env("DEN_RETENTION_DAYS"), do: config(:den, retention_days: String.to_integer(v))
 
+# Requests to the door per address a minute (60), and asks to join an hour (5):
+# higher for a circle that shares one address (a school, an office).
+if v = System.get_env("DEN_DOOR_PER_MINUTE"), do: config(:den, door_per_minute: String.to_integer(v))
+if v = System.get_env("DEN_ASK_PER_HOUR"), do: config(:den, ask_per_hour: String.to_integer(v))
+
 # How many days of day keys the den keeps ahead itself (0: the host makes them).
 if v = System.get_env("DEN_KEYS_AHEAD"), do: config(:den, keys_ahead: String.to_integer(v))
+
+if v = System.get_env("DEN_TOMORROW_FROM") do
+  h = String.to_integer(v)
+  h in 0..23 || raise "DEN_TOMORROW_FROM: the UTC hour (0 to 23) from which the door signs tomorrow's tokens"
+  config :den, tomorrow_from_hour: h
+end
 
 if config_env() == :prod do
   database_path = System.get_env("DATABASE_PATH", "/var/lib/den/den.db")

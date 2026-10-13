@@ -45,7 +45,7 @@ test('a file message from another device is checked before it is shown or fetche
   const b64 = (n) => Buffer.alloc(n, 7).toString('base64');
   const good = { blob: 'a'.repeat(64), name: 'cave.png', mime: 'image/png', size: 1000, key: b64(32), iv: b64(12) };
   assert.deepEqual(fileMeta(good), good);
-  for (const bad of [{ blob: '../door/keys' }, { blob: 'A'.repeat(64) }, { key: b64(16) }, { iv: 'not base64!' }, { size: -1 }, { size: 26 * 1024 * 1024 }, { size: '9' }]) {
+  for (const bad of [{ blob: '../door/keys' }, { blob: 'A'.repeat(64) }, { key: b64(16) }, { iv: 'not base64!' }, { size: -1 }, { size: 2 ** 31 + 1 }, { size: '9' }, { chunk: 4096 }]) {
     assert.equal(fileMeta({ ...good, ...bad }), null, JSON.stringify(bad));
   }
   assert.equal(fileMeta({ ...good, mime: 'image/svg+xml' }).mime, 'application/octet-stream', 'SVG is a download, never shown in place');
@@ -66,4 +66,73 @@ test("a device's pass hash is the one the den's member list keeps", async () => 
     // Den.Gate.Members.hash/1 of 32 × 0x11 (server/test/den/members_test.exs checks the same vector).
     assert.equal(pass, '89fbbb8554656bd7bdd0f200b552b67d6cc3c8faabd86261531e1d49ce822833');
   } finally { crypto.getRandomValues = realRandom; }
+});
+
+test('a name a member gives themselves is one plain line that cannot pass for a device name', async () => {
+  const { nickOf } = await import('../dist/den.js');
+  assert.equal(nickOf('  Ada  Lovelace '), 'Ada Lovelace');
+  assert.equal(nickOf('Ada‮ecalevol'), 'Adaecalevol', 'no bidirectional controls');
+  assert.equal(nickOf('a\nb'), 'a b');
+  assert.equal(nickOf('x'.repeat(40)).length, 32);
+  assert.equal(nickOf('m-e0458d253595addd653e'), '', 'not a device name');
+  assert.equal(nickOf('M-0abc'), '');
+  assert.equal(nickOf('m-zed'), 'm-zed', 'only m- and hex is a device name');
+  assert.equal(nickOf(''), '');
+  assert.equal(nickOf(7), '7');
+});
+
+test('a file is sealed in pieces that open only whole and in order', async () => {
+  const { webcrypto } = await import('node:crypto');
+  globalThis.crypto ??= webcrypto;
+  const { DenClient, CHUNK, sealedSize } = await import('../dist/den.js');
+  const den = Object.create(DenClient.prototype);
+  den.base = 'https://den.test';
+  den.sessionToken = { session: 's' };
+  den.waysSeen = Promise.resolve({ file_max: 100e6 });
+  let sealed = null;
+  let sentMsg = null;
+  den.upload = async (blob) => { sealed = new Uint8Array(await blob.arrayBuffer()); return { id: 'a'.repeat(64) }; };
+  den.send = async (_room, body) => { sentMsg = body; return 'id'; };
+  const realFetch = globalThis.fetch;
+  let served = null;
+  globalThis.fetch = async () => new Response(served);
+  try {
+    for (const size of [0, 1, CHUNK, CHUNK + 1, 2.5 * CHUNK]) {
+      const data = new Uint8Array(size);
+      for (let o = 0; o < size; o += 65536) webcrypto.getRandomValues(data.subarray(o, o + 65536));
+      await den.sendFile('general', new File([data], 'f.bin'));
+      assert.equal(sealed.length, sealedSize(size), `sealed size for ${size}`);
+      assert.equal(sentMsg.file.chunk, CHUNK);
+      served = sealed;
+      const back = new Uint8Array(await (await den.openFile(sentMsg.file)).arrayBuffer());
+      assert.deepEqual(back, data, `round trip of ${size} bytes`);
+    }
+    // 2.5 pieces: the last one dropped, or two swapped, does not open.
+    const whole = CHUNK + 16;
+    served = sealed.slice(0, 2 * whole);
+    await assert.rejects(den.openFile(sentMsg.file), /not whole|operation/i, 'cut short');
+    served = new Uint8Array([...sealed.slice(whole, 2 * whole), ...sealed.slice(0, whole), ...sealed.slice(2 * whole)]);
+    await assert.rejects(den.openFile(sentMsg.file), 'reordered');
+    served = sealed;
+    await assert.rejects(den.openFile({ ...sentMsg.file, size: sentMsg.file.size - 1 }), 'a size that does not match');
+    den.waysSeen = Promise.resolve({ file_max: 1000 });
+    await assert.rejects(den.sendFile('general', new File([new Uint8Array(2000)], 'big.bin')), /at most/);
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('two devices are one person only when each says so of the other', async () => {
+  const { DenClient } = await import('../dist/den.js');
+  const den = Object.create(DenClient.prototype);
+  const [a, b, c] = ['a', 'b', 'c'].map((x) => x.repeat(64));
+  den.me = { key: a, nick: '' };
+  den.myLinks = [b];
+  den.claims = { [b]: [a], [c]: [a] };
+  den.nicks = { [b]: { name: 'Ada', at: 1 } };
+  assert.deepEqual(den.linkedTo(a), [b]);
+  assert.deepEqual(den.linkedTo(b), [a]);
+  assert.deepEqual(den.linkedTo(c), [], 'c says it is a, a never said so');
+  assert.equal(den.isMe(b), true);
+  assert.equal(den.isMe(c), false);
+  assert.equal(den.nickFor(a), 'Ada', "a device takes its linked device's name");
+  assert.equal(den.nickFor(c), '');
 });

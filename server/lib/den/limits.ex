@@ -4,8 +4,10 @@ defmodule Den.Limits do
   anything: set under `config :den, :limits` (each key optional).
 
   * `:message_bytes` — bytes of messages relayed, per device per day (20 MB)
-  * `:file_bytes` — bytes of files stored, per device per day (250 MB)
+  * `:file_max` — bytes of one file as stored, encrypted (100 MB)
+  * `:file_bytes` — bytes of files stored, per device per day (500 MB)
   * `:files` — files stored, per device per day (200)
+  * `:room_members` — members in one room (500; up to 1000)
   * `:invites` — invitations sent, per device per day (200)
   * `:inbox` — Welcomes waiting for one device at once (100)
   * `:history_bytes` — ciphertext in one history reply (4 MB)
@@ -14,8 +16,10 @@ defmodule Den.Limits do
 
   @defaults %{
     message_bytes: 20_000_000,
-    file_bytes: 250_000_000,
+    file_max: 100_000_000,
+    file_bytes: 500_000_000,
     files: 200,
+    room_members: 500,
     invites: 200,
     inbox: 100,
     history_bytes: 4_000_000,

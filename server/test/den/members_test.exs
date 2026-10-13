@@ -16,9 +16,12 @@ defmodule Den.MembersTest do
   setup do
     Application.put_env(:den, :keys_dir, Path.join(@f, "keys"))
     Application.put_env(:den, :today, fn -> ~D[2026-10-12] end)
+    # Late in the day, when the door also signs tomorrow's tokens.
+    Application.put_env(:den, :now, fn -> ~U[2026-10-12 22:30:00Z] end)
     blinded = String.trim(File.read!(Path.join(@f, "blinded.hex")))
     on_exit(fn ->
       Application.delete_env(:den, :today)
+      Application.delete_env(:den, :now)
       Application.put_env(:den, :entry, [:invite, :approval, :external])
     end)
     %{blinded: blinded}
@@ -183,6 +186,7 @@ defmodule Den.MembersTest do
     assert capture_io(fn -> Den.Host.invites() end) =~ ~r/made 20\d\d-.* open until 20\d\d-/
     assert capture_io(fn -> Den.Host.requests() end) =~ "hello there"
     assert capture_io(fn -> Den.Host.invite(2, 1) end) |> String.split("\n", trim: true) |> length() == 2
+    assert capture_io(fn -> Den.Host.invite(420, 1) end) =~ "1 to 100 at a time"
     assert %{} = Den.Host.members()
   end
 

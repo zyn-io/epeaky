@@ -124,10 +124,25 @@ await A.p.evaluate(async () => {
 });
 ok(await until(B.p, () => /reports a different door key/.test(document.querySelector('#den-warn')?.textContent || ''), null, 15000), 'a roommate shown a different door key is flagged, by name');
 
+// Names members give themselves: sealed, and shown beside the device's own name.
+await A.p.evaluate(() => window.__den.setNick('Ada'));
+await B.p.evaluate(() => window.__den.setNick('Bo'));
+ok(await until(B.p, ([k]) => window.__den.nickFor(k) === 'Ada', [A.me.key], 15000) && await until(A.p, ([k]) => window.__den.nickFor(k) === 'Bo', [B.me.key], 15000), 'each sees the name the other gave themselves');
+ok(await until(A.p, () => document.querySelector('#me')?.textContent === 'Ada', null, 5000), 'A sees its own name');
+
 // Words, a mention, a reply, a reaction, an edit, a deletion.
 await A.p.fill('#say-text', `Hello @${B.me.name}, welcome to the den.`);
 await A.p.press('#say-text', 'Enter');
 ok(await until(B.p, () => document.querySelector('#log li.ping')), 'B sees the mention highlighted');
+ok(await until(B.p, ([s]) => [...document.querySelectorAll('#log .msg-head')].some((h) => h.querySelector('.who')?.textContent === 'Ada' && h.querySelector('.id')?.textContent === s), [`m-${A.me.key.slice(0, 6)}`]), 'B sees A as Ada, beside the start of its device name');
+ok(await until(A.p, () => [...document.querySelectorAll('#log mark')].some((m) => m.textContent === '@Bo')), 'a mention shows the name its member chose');
+// A member who takes another's name is flagged in the members list.
+await A.p.evaluate(() => window.__den.setNick('Bo'));
+await until(B.p, ([k]) => window.__den.nickFor(k) === 'Bo', [A.me.key], 15000);
+await B.p.click('#room-meta');
+ok(await until(B.p, () => !!document.querySelector('#members .alike'), null, 5000), 'two members with the same name are flagged');
+await B.p.click('#room-meta');
+await A.p.evaluate(() => window.__den.setNick('Ada'));
 await B.p.hover('#log li.ping');
 await B.p.click('#log li.ping [data-act="reply"]');
 await B.p.fill('#say-text', 'Glad to be here.');
@@ -154,6 +169,14 @@ await until(B.p, () => /This one will go/.test(document.querySelector('#log')?.t
 await A.p.evaluate(([id]) => window.__den.remove('general', id), [goneId]);
 ok(await until(B.p, ([id]) => document.querySelector(`#log li[data-id="${id}"]`)?.classList.contains('gone'), [goneId]), 'a deletion reaches B');
 
+// Fresh keys: A replaces its own MLS keys in General; the room moves on and B reads A after it.
+const epochBefore = await A.p.evaluate(() => Number(window.__den.den.epoch('general')));
+await A.p.evaluate(() => window.__den.refreshKeys('general'));
+ok(await A.p.evaluate(([e]) => Number(window.__den.den.epoch('general')) === e + 1, [epochBefore]), "A's fresh keys are a commit the den ordered");
+await A.p.fill('#say-text', 'Keys refreshed.');
+await A.p.press('#say-text', 'Enter');
+ok(await until(B.p, () => /Keys refreshed\./.test(document.querySelector('#log')?.textContent || ''), null, 15000), 'B reads A after A refreshed its keys');
+
 // Typing.
 await B.p.type('#say-text', 'typ');
 ok(await until(A.p, () => /is writing/.test(document.querySelector('#typing')?.textContent || ''), null, 8000), 'A sees B writing');
@@ -170,6 +193,22 @@ await A.p.evaluate(async () => {
 ok(await until(B.p, () => [...document.querySelectorAll('#log .att img')].some((i) => i.src.startsWith('blob:') && i.naturalWidth === 40)), 'B sees the image, decrypted in the browser');
 const doc = await B.p.evaluate(async () => { const log = await window.__den.log('general'); const f = log.find((m) => m.file?.name === 'minutes.txt'); return (await window.__den.openFile(f.file)).text(); });
 ok(doc === 'the minutes of the first meeting', 'B opens the document');
+// A file of several pieces, past the old 25 MB limit's pieces logic: 30 MB.
+const bigSum = await A.p.evaluate(async () => {
+  const data = new Uint8Array(30 * 1024 * 1024);
+  for (let o = 0; o < data.length; o += 65536) crypto.getRandomValues(data.subarray(o, o + 65536));
+  await window.__den.sendFile('general', new File([data], 'archive.bin', { type: 'application/octet-stream' }));
+  return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', data))).map((x) => x.toString(16).padStart(2, '0')).join('');
+});
+const bigBack = await B.p.evaluate(async () => {
+  for (let t = 0; t < 50; t++) {
+    const f = (await window.__den.log('general')).find((m) => m.file?.name === 'archive.bin');
+    if (f) { const b = await window.__den.openFile(f.file); return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await b.arrayBuffer()))).map((x) => x.toString(16).padStart(2, '0')).join(''); }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return 'not arrived';
+});
+ok(bigBack === bigSum, 'a 30 MB file, sealed in pieces, opens whole on the other side');
 
 // A room a member makes.
 const nw = await B.p.evaluate(() => window.__den.push(window.__den.lobby, 'open_room', { title: 'Night watch' }));
@@ -204,6 +243,25 @@ ok(await until(A.p, () => /Just us here\./.test(document.querySelector('#log')?.
 const listed = await A.p.evaluate(async () => (await fetch('/door/keys')).ok && (await window.__den.push(window.__den.lobby, 'claim', { key: window.__den.me.key }).then(() => 'claimed', (e) => e.reason)));
 ok(true, `(own invitations left check: ${listed})`);
 
+// Linked devices: E, A's second device (in by its own invite), takes A's
+// link code; each says the other is the same person, B sees one person, and
+// A brings E into its private room.
+const E = await person('E', `${DEN}/#invite=${host('IO.puts(hd(Den.Gate.Members.invite(1, 1)))')}`);
+ok(await inside(E.p) && await until(E.p, () => window.__den.inRoom('general'), null, 30000), 'E is in General');
+const eKey = (await meOf(E.p)).key;
+await until(A.p, ([k]) => window.__den.members('general').some((m) => m.key === k), [eKey], 20000);
+await B.p.evaluate(() => window.__den.useLink('abcde-fghjk'));
+const code = await A.p.evaluate(() => window.__den.startLink());
+await E.p.evaluate(([c]) => window.__den.useLink(c), [code]);
+ok(await until(E.p, ([k]) => window.__den.isMe(k), [A.me.key], 20000) && await until(A.p, ([k]) => window.__den.isMe(k), [eKey], 20000), 'A and E are linked, each saying so of the other');
+ok(await until(B.p, ([a, e]) => window.__den.linkedTo(a).includes(e), [A.me.key, eKey], 20000), 'B sees A and E as one person');
+ok(!(await A.p.evaluate(([k]) => window.__den.isMe(k), [B.me.key])), 'a wrong code links nothing');
+ok(await until(E.p, () => window.__den.me.nick === 'Ada', null, 10000), "E takes A's name");
+await B.p.click('#room-meta');
+ok(await until(B.p, () => /2 devices/.test(document.querySelector('#members')?.textContent || ''), null, 10000), "B's members list shows Ada once, with 2 devices");
+await B.p.click('#room-meta');
+ok(await until(E.p, () => !!document.querySelector('[data-join]'), null, 30000), 'A brings E into its private room: an invitation waits on E');
+
 // Search.
 await A.p.fill('#search', 'watch');
 ok(await until(A.p, () => /Anyone on watch/.test(document.querySelector('#found')?.textContent || '')), 'search finds words across rooms');
@@ -215,12 +273,14 @@ await B.p.click('[data-room="general"]');
 await A.p.click('#voice-go');
 await B.p.click('#voice-go');
 ok(await until(A.p, () => !document.querySelector('#voice').hidden), 'A is in voice');
-ok(await until(A.p, ([n]) => (document.querySelector('#voice-who')?.textContent || '').includes(n), [B.me.name], 20000), 'A sees B in voice');
+ok(await until(A.p, () => (document.querySelector('#voice-who')?.textContent || '').includes('Bo'), null, 20000), 'A sees B in voice, by the name B chose');
 await A.p.waitForTimeout(6000);
 const va = await A.p.evaluate(async () => { const v = window.__den.voice; const st = await v.pc.getStats(); let rx = 0; st.forEach((r) => { if (r.type === 'inbound-rtp' && r.kind === 'audio') rx += r.bytesReceived || 0; }); return { sealed: v.sealed, opened: v.opened, failed: v.failed, rx, state: v.pc.connectionState }; });
 const vb = await B.p.evaluate(async () => { const v = window.__den.voice; return { sealed: v.sealed, opened: v.opened, failed: v.failed, state: v.pc.connectionState }; });
 console.log('      A voice:', JSON.stringify(va), '· B voice:', JSON.stringify(vb));
 ok(va.state === 'connected' && vb.state === 'connected', 'both voice connections are up');
+ok(await A.p.evaluate(() => /a=extmap:\d+ urn:ietf:params:rtp-hdrext:ssrc-audio-level/.test(window.__den.voice.pc.remoteDescription.sdp)), 'the den asks for the audio level it ranks speakers by');
+ok(await A.p.evaluate(([k]) => window.__den.voice.roster.includes(k), [B.me.key]), "B is on A's voice roster");
 ok(va.sealed > 50 && vb.sealed > 50, 'each side seals its own audio frames');
 ok(va.opened > 50 && vb.opened > 50, 'each side opens the other\'s frames (the key is the room\'s, the den has none)');
 // A forwarding unit that names the wrong speaker: A's slot for B relabelled
@@ -240,6 +300,48 @@ await A.p.evaluate(() => window.__den.voice.postSlots());
 ok(await until(A.p, ([n]) => window.__den.voice.opened > n, [relabel.after], 10000), 'named rightly again, it opens');
 await A.p.click('#voice-leave');
 ok(await until(A.p, () => document.querySelector('#voice').hidden), 'A leaves voice');
+
+// Voice relayed by the den (a network that lets no WebRTC through): B over
+// the channel, A over WebRTC; each opens the other's sealed frames.
+await B.p.click('#voice-leave');
+await until(B.p, () => document.querySelector('#voice').hidden);
+await A.p.click('#voice-go');
+ok(await until(A.p, () => window.__den.voice?.pc?.connectionState === 'connected', null, 15000), 'A is back in voice over WebRTC');
+await B.p.evaluate(() => window.__den.joinVoice('general', () => {}, { mode: 'relay' }));
+ok(await until(B.p, () => window.__den.voice?.mode === 'relay', null, 10000), 'B is in voice through the den');
+await A.p.waitForTimeout(5000);
+const ra = await A.p.evaluate(() => { const v = window.__den.voice; return { opened: v.opened, sealed: v.sealed }; });
+const rb = await B.p.evaluate(() => { const v = window.__den.voice; return { opened: v.opened, sealed: v.sealed, decoders: v.decoders.size, level: Object.values(v.relayLevels).some((x) => x > 0) }; });
+console.log('      relay A:', JSON.stringify(ra), '· B:', JSON.stringify(rb));
+ok(rb.sealed > 100 && ra.opened > 100, "A hears B's relayed frames over WebRTC");
+ok(rb.opened > 100 && rb.decoders >= 1, "B opens and decodes A's frames from the channel");
+await B.p.evaluate(() => window.__den.voice?.leave());
+
+// And found by itself: D's WebRTC finds no path to the den (relay-only ICE
+// with no relay, as on a network that lets no UDP out), so it never
+// connects and the page moves voice to the den's own connection.
+const strict = await chromium.launch({ executablePath: CHROME, headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required'] });
+const dCtx = await strict.newContext({ viewport: { width: 1300, height: 900 }, permissions: ['microphone'] });
+const D = { p: await dCtx.newPage() };
+await D.p.addInitScript(() => {
+  navigator.mediaDevices.getUserMedia = async () => { const ac = new AudioContext(); const o = ac.createOscillator(); const d = ac.createMediaStreamDestination(); o.connect(d); o.start(); return d.stream; };
+  const Real = window.RTCPeerConnection;
+  window.RTCPeerConnection = function (cfg) { return new Real({ ...cfg, iceTransportPolicy: 'relay' }); };
+  window.RTCPeerConnection.prototype = Real.prototype;
+});
+D.p.on('pageerror', (e) => errs.push(`D: ${e.message.slice(0, 200)}`));
+await D.p.goto(`${DEN}/#invite=${host('IO.puts(hd(Den.Gate.Members.invite(1, 1)))')}`, { waitUntil: 'networkidle' });
+ok(await inside(D.p), 'D is in, on a browser whose WebRTC finds no path');
+ok(await until(D.p, () => window.__den.inRoom('general'), null, 30000), 'D is in General');
+await D.p.click('#voice-go');
+ok(await until(D.p, () => window.__den.voice?.mode === 'relay', null, 25000), 'WebRTC cannot connect, so D is in voice through the den');
+ok(await until(D.p, () => /relayed/.test(document.querySelector('#voice .voice-label')?.textContent || ''), null, 5000), 'the page says voice is relayed');
+await A.p.waitForTimeout(4000);
+const rd = await D.p.evaluate(() => ({ opened: window.__den.voice.opened, sealed: window.__den.voice.sealed }));
+ok(rd.opened > 50 && rd.sealed > 50, `D hears A and is heard (${JSON.stringify(rd)})`);
+await D.p.evaluate(() => window.__den.voice?.leave());
+await strict.close();
+await A.p.click('#voice-leave');
 
 // A member sends a commit the den accepts but nobody can apply (its
 // membership tag flipped): B cannot apply it, reports it, and the den undoes
