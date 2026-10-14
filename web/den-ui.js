@@ -62,6 +62,7 @@ const ICON = {
   reply: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3 2 7l4 4M2 7h7a5 5 0 0 1 5 5v1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
   react: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 9.5c1.3 1.6 3.7 1.6 5 0" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M6 6h.01M10 6h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
   edit: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 13 1-4 7-7 3 3-7 7-4 1Z" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
+  pin: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2h4l-.5 4 2.5 2.5H4L6.5 6 6 2ZM8 8.5V14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
   del: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4h10M6 4V2.5h4V4M4.5 4l.7 9.5h5.6L11.5 4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
   file: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.5h5l3.5 3.5v9.5H4z M9 1.5V5h3.5" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>',
 };
@@ -69,6 +70,9 @@ const ICON = {
 export function mountDen(den, el, me) {
   let room = 'general';
   let reply = null;
+  // The side panel: 'members' or 'pins'; and each room's pins, as last read.
+  let side = 'members';
+  const pinCache = {};
   let editing = null;
   let readFrom = 0;
   let mentionAt = -1;
@@ -107,7 +111,8 @@ export function mountDen(den, el, me) {
   const agentTag = (key) => {
     if (!den.isAgent(key)) return '';
     const owner = den.agentOwner(key);
-    return `<span class="tag-agent" title="${esc(owner ? `Agent of ${display(owner)} (${nameOf(owner)})` : 'Says it is an agent. No member has confirmed it as theirs.')}">agent</span>`;
+    const label = !owner ? 'agent' : owner === me.key || den.agentsOf(me.key).includes(key) ? 'your agent' : `${display(owner)}’s agent`;
+    return `<span class="tag-agent" title="${esc(owner ? `Agent of ${display(owner)} (${nameOf(owner)})` : 'Says it is an agent. No member has confirmed it as theirs.')}">${esc(label)}</span>`;
   };
   // Role colours: the page's rules allow no style attributes in markup, so
   // each [data-c] is painted here, once drawn (a colour is only ever #rrggbb).
@@ -200,6 +205,7 @@ export function mountDen(den, el, me) {
     el('room-title').classList.toggle('plain', r?.kind === 'private');
     el('room-kind').textContent = r?.kind === 'private' ? 'Private' : r?.kind === 'proposal' ? 'Proposal' : '';
     el('room-meta').textContent = counts[room] ? `Members · ${counts[room]}` : 'Members';
+    drawPinCount();
     el('room-topic').textContent = r?.kind === 'open' ? plain(r.topic || '') : '';
     const slow = den.slowOf(room);
     el('room-slow').hidden = !slow;
@@ -247,7 +253,7 @@ export function mountDen(den, el, me) {
 
   /// A small form in a dialog: a heading, a line, an optional field; resolves
   /// with the field's value (or true), or null when closed.
-  function ask({ heading, text = '', field = null, yes, danger = false, value = '', empty = false }) {
+  function ask({ heading, text = '', field = null, yes, danger = false, value = '', empty = false, readonly = false }) {
     const d = el('ask');
     d.querySelector('h2').textContent = heading;
     d.querySelector('.ask-text').textContent = text;
@@ -256,11 +262,12 @@ export function mountDen(den, el, me) {
     label.hidden = !field;
     const input = label.querySelector('input');
     if (field) { label.querySelector('span').textContent = field; input.value = value; }
+    input.readOnly = !!readonly;
     const ok = d.querySelector('[data-yes]');
     ok.textContent = yes;
     ok.classList.toggle('danger', danger);
     d.showModal();
-    if (field) input.focus(); else ok.focus();
+    if (field) { input.focus(); if (readonly) input.select(); } else ok.focus();
     return new Promise((resolve) => {
       let answer = null;
       d.querySelector('form').onsubmit = (e) => {
@@ -383,6 +390,7 @@ export function mountDen(den, el, me) {
       <div class="tools" role="toolbar" aria-label="Message actions">
         <button type="button" data-act="reply" aria-label="Reply" title="Reply">${ICON.reply}</button>
         <button type="button" data-act="react" aria-label="React" title="React" aria-expanded="false">${ICON.react}</button>
+        ${den.mayPost(room) ? (() => { const on = (pinCache[room] || []).some((p) => p.of === m.id && p.by === me.key); return `<button type="button" data-act="pin" aria-label="${on ? 'Unpin' : 'Pin'}" title="${on ? 'Unpin' : 'Pin for everyone, also who joins later'}" aria-pressed="${on}">${ICON.pin}</button>`; })() : ''}
         ${own && !m.file ? `<button type="button" data-act="edit" aria-label="Edit" title="Edit">${ICON.edit}</button>` : ''}
         ${own ? `<button type="button" data-act="del" aria-label="Delete" title="Delete">${ICON.del}</button>` : ''}
         ${!own && den.can('manage_messages') && den.rooms.get(room)?.kind !== 'private' ? `<button type="button" data-act="moddel" aria-label="Delete (moderator)" title="Delete (moderator)">${ICON.del}</button>` : ''}
@@ -532,6 +540,13 @@ export function mountDen(den, el, me) {
     if (!m || !t.dataset.act) return;
     if (t.dataset.act === 'reply') { reply = m; editing = null; drawComposer(); el('say-text').focus(); }
     if (t.dataset.act === 'edit') startEdit(m);
+    if (t.dataset.act === 'pin') {
+      const had = (pinCache[room] || []).find((p) => p.of === m.id && p.by === me.key);
+      try {
+        if (had) await den.unpin(room, had.pin); else await den.pin(room, m);
+        status(had ? 'Unpinned.' : 'Pinned. Everyone who joins later gets it too.');
+      } catch (err) { status(err.message); }
+    }
     if (t.dataset.act === 'moddel') {
       if (await ask({ heading: 'Delete message', text: `${display(m.key)}'s message is removed for everyone in the channel. Devices that already read it may keep their copy.`, yes: 'Delete', danger: true })) den.modDelete(room, m.seq).catch((err) => status(err.message));
     }
@@ -720,6 +735,7 @@ export function mountDen(den, el, me) {
   // ---- Members ----------------------------------------------------------------
 
   function drawMembers() {
+    if (side === 'pins') return drawPins();
     const all = den.members(room);
     // One row per person: devices linked to each other (each says so) are one.
     const seenKeys = new Set();
@@ -772,13 +788,45 @@ export function mountDen(den, el, me) {
     const inv = el('invite');
     if (inv) inv.onclick = () => pickMembers('Invite to this room', 'Invite', false, (keys) => den.invite(room, keys));
   }
-  function toggleMembers() {
-    const open = el('members').hidden;
+  function toggleMembers() { toggleSide('members'); }
+  /// The side panel shows the room's members or its pins.
+  function toggleSide(want) {
+    const open = el('members').hidden || side !== want;
+    side = want;
     el('members').hidden = !open;
-    el('room-meta').setAttribute('aria-expanded', String(open));
+    el('room-meta').setAttribute('aria-expanded', String(open && side === 'members'));
+    pinsGo.setAttribute('aria-expanded', String(open && side === 'pins'));
     if (open) drawMembers();
   }
   el('room-meta').onclick = toggleMembers;
+  // Pins: a button of their own beside Members, made here so every page has it.
+  const pinsGo = document.createElement('button');
+  pinsGo.type = 'button';
+  pinsGo.className = 'pill';
+  pinsGo.id = 'room-pins';
+  pinsGo.hidden = true;
+  pinsGo.setAttribute('aria-controls', 'members');
+  pinsGo.setAttribute('aria-expanded', 'false');
+  el('room-meta').before(pinsGo);
+  pinsGo.onclick = () => toggleSide('pins');
+  async function drawPinCount() {
+    const r = room;
+    const pins = await den.pinsOf(r);
+    if (r !== room) return;
+    pinCache[r] = pins;
+    pinsGo.hidden = !pins.length;
+    pinsGo.textContent = `Pins · ${pins.length}`;
+  }
+  async function drawPins() {
+    const r = room;
+    const pins = await den.pinsOf(r);
+    if (r !== room || side !== 'pins') return;
+    el('members').innerHTML = `<div class="members-head"><h3>Pins · ${pins.length}</h3><button type="button" class="x" data-close aria-label="Close pins">×</button></div>
+      ${pins.length ? `<ul class="pins">${pins.slice().reverse().map((p) => `<li><p class="pin-text">${esc(p.text)}</p><p class="pin-by">Pinned by ${whoHtml(p.by)} · ${time(p.at)}</p>${p.by === me.key || (den.can('manage_messages') && den.rooms.get(r)?.kind !== 'private') ? `<button type="button" class="mini" data-unpin="${esc(p.pin)}" data-by="${esc(p.by)}">Unpin</button>` : ''}</li>`).join('')}</ul>` : '<p class="none">Nothing pinned yet. Pin a message from its menu: everyone who joins later gets it too.</p>'}`;
+    paint(el('members'));
+    el('members').querySelector('[data-close]').onclick = () => toggleSide('pins');
+    el('members').querySelectorAll('[data-unpin]').forEach((b) => { b.onclick = () => den.unpin(room, b.dataset.unpin, b.dataset.by).then(() => status('Unpinned.'), (e) => status(e.message)); });
+  }
 
   // The room list as a drawer, on a phone.
   el('rooms-open').onclick = () => el('den').classList.toggle('drawer');
@@ -810,14 +858,70 @@ export function mountDen(den, el, me) {
     if (notify !== 'off' && typeof Notification !== 'undefined' && Notification.permission === 'default') await Notification.requestPermission();
     if (notify !== 'off' && typeof Notification !== 'undefined' && Notification.permission === 'denied') status('Notifications are blocked for this site in the browser settings.');
     try { localStorage.setItem('den.notify', notify); } catch { /* not kept */ }
+    syncPush();
   };
+  // What a push is, said where the choice is made.
+  el('notify').closest('label')?.insertAdjacentHTML('afterend', '<p class="push-note">With this page closed, notifications come through your browser’s push service (Apple, Google, Mozilla or Microsoft). It sees when one arrives, from which den, and which of its users get pushes from that den around the same time; a push names the room, never the words. With “Mentions and private”, a closed page hears of private rooms only: the den cannot see mentions.</p>');
+
+  // Installed on the home screen: its own window, notifications on iPhone, and
+  // this device's keys kept (Safari clears a site's data after a week unused).
+  let sw = null;
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js').then((r) => { sw = r; syncPush(); }).catch(() => {});
+    navigator.serviceWorker.addEventListener('message', (e) => { if (e.data?.den === 'open' && typeof e.data.room === 'string' && den.rooms.has(e.data.room)) go(e.data.room); });
+  }
+  navigator.storage?.persist?.().catch(() => {});
+  const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  const foot = el('forget').parentElement;
+  let installAsk = null;
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    installAsk = e;
+    if (document.getElementById('install-app')) return;
+    foot.querySelector('.link-acts')?.insertAdjacentHTML('beforeend', '<button type="button" class="mini ghost" id="install-app">Install</button>');
+    document.getElementById('install-app').onclick = async () => {
+      installAsk?.prompt();
+      const { outcome } = (await installAsk?.userChoice) || {};
+      if (outcome === 'accepted') document.getElementById('install-app')?.remove();
+    };
+  });
+  if (!standalone && /iPhone|iPad|iPod/.test(navigator.userAgent)) {
+    foot.insertAdjacentHTML('beforeend', '<p class="push-note">On iPhone: Share, then Add to Home Screen. Installed, this device keeps its keys and gets notifications.</p>');
+  }
+
+  /// This device's push address, in step with the setting: signed up when
+  /// notifications are on and allowed, taken back when they are off.
+  async function syncPush() {
+    if (!sw || !('PushManager' in window) || typeof Notification === 'undefined') return;
+    try {
+      let sub = await sw.pushManager.getSubscription();
+      if (notify === 'off' || Notification.permission !== 'granted') {
+        if (sub) { await den.pushOff(sub.endpoint).catch(() => {}); await sub.unsubscribe().catch(() => {}); }
+        return;
+      }
+      const key = await den.pushKey();
+      const raw = Uint8Array.from(atob(key.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+      // Made for another key (the den's was replaced): sign up again.
+      const had = sub?.options?.applicationServerKey ? new Uint8Array(sub.options.applicationServerKey) : null;
+      if (sub && had && (had.length !== raw.length || had.some((b, i) => b !== raw[i]))) { await sub.unsubscribe().catch(() => {}); sub = null; }
+      if (!sub) sub = await sw.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: raw });
+      const j = sub.toJSON();
+      await den.pushSub({ endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth, mode: notify === 'all' ? 'all' : 'private' });
+    } catch (e) {
+      // A browser without a push service the den sends to: notifications only while open.
+      if (/push service/.test(e.message || '')) status(e.message);
+    }
+  }
 
   function ping(room_, m, mention) {
     if (!document.hidden || notify === 'off' || typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
     const priv = den.rooms.get(room_)?.kind === 'private';
     if (muted.has(room_)) return;
     if (notify === 'mentions' && !mention && !priv) return;
-    const n = new Notification(plain(roomTitle(room_)), { body: plain(`${display(m.key)}: ${(m.text || m.file?.name || '').slice(0, 120)}`), tag: room_ });
+    const opts = { body: plain(`${display(m.key)}: ${(m.text || m.file?.name || '').slice(0, 120)}`), tag: room_, data: { room: room_ } };
+    // Installed, a page cannot make a Notification itself: its worker shows it.
+    if (sw) return sw.showNotification(plain(roomTitle(room_)), opts).catch(() => {});
+    const n = new Notification(plain(roomTitle(room_)), opts);
     n.onclick = () => { window.focus(); go(room_); n.close(); };
   }
   document.addEventListener('visibilitychange', () => { if (!document.hidden && nearBottom()) { den.markRead(room); drawRooms(); } });
@@ -909,10 +1013,30 @@ export function mountDen(den, el, me) {
       status('This device was removed from the den by its moderators.', true);
       el('say').hidden = true;
     }
+    if (event === 'pins' && d.room === room) { drawPinCount().then(() => { drawLog(); if (!el('members').hidden && side === 'pins') drawPins(); }); }
     if (event === 'linked') status('Linked: members now see these devices as one person.');
-    if (event === 'owned') status(`${display(d.key)} is now your agent. It takes orders from you only.`);
+    if (event === 'owned') {
+      const said = `${display(d.key)} is now your agent. It takes orders from you only.`;
+      agentInvite = null;
+      status(said);
+      // The dialog that showed the code says so too, where the member is looking.
+      const a = el('ask');
+      if (a.open && a.dataset.kind === 'own') {
+        a.querySelector('h2').textContent = 'Agent added';
+        a.querySelector('.ask-text').textContent = said;
+        a.querySelector('.ask-text').hidden = false;
+        a.querySelector('.ask-field').hidden = true;
+        a.querySelector('[data-yes]').textContent = 'Done';
+      }
+    }
     if (event === 'offline') status('Reconnecting…', true);
-    if (event === 'online') status('');
+    if (event === 'online') {
+      status('');
+      syncPush();
+      // Opened from a notification: that room.
+      const want = new URLSearchParams(location.hash.slice(1)).get('room');
+      if (want) { history.replaceState(null, '', location.pathname); setTimeout(() => { if (den.rooms.has(want)) go(want); }, 500); }
+    }
     if (event === 'error') status(`${roomTitle(d.room)}: ${d.error}`);
     if (event === 'notice') status(`${roomTitle(d.room)}: ${d.text}`, true);
     // A roommate was shown a different door key for a day: the den may be
@@ -938,12 +1062,26 @@ export function mountDen(den, el, me) {
       await ask({ heading: 'Link another device', text: `On the other device, enter this den with its own invite, choose “Enter a link code” and type ${code} within ten minutes. Members then see both as you.`, yes: 'Done' });
     };
   }
+  let agentInvite = null;
   // An agent of this member's (epeaky-agent): a code shown here, given to it there.
   const agentGo = el('add-agent');
   if (agentGo) {
     agentGo.onclick = async () => {
       const code = den.startOwn();
-      await ask({ heading: 'Add an agent', text: `On the agent's machine, within ten minutes, run: epeaky-agent owner ${code}  (add --agent NAME if you run several). The agent must be in this den. It then takes orders from you and your linked devices only.`, yes: 'Done' });
+      // A member who may make invites gets one command that brings the agent
+      // in and makes it theirs; anyone else, the code for an agent already in.
+      // One invite until an agent takes it: closing the dialog and opening it
+      // again within the hour shows the same one, not a new one each time.
+      let link = agentInvite && Date.now() - agentInvite.at < 3_600_000 ? agentInvite.link : null;
+      if (!link && den.can('manage_invites')) {
+        try { link = (await den.modDo('invite_make', { n: 1, days: 1 })).links?.[0] || null; } catch { link = null; }
+        if (link) agentInvite = { link, at: Date.now() };
+      }
+      el('ask').dataset.kind = 'own';
+      await ask(link
+        ? { heading: 'Add an agent', text: 'Run this on the agent’s machine within ten minutes. The agent joins the den with a new invite and takes orders from you and your linked devices only. Whoever runs it first becomes your agent: give it to your agent alone. Add --agent NAME to run more than one there.', field: 'Command', value: `epeaky-agent join '${link}' --owner ${code}`, readonly: true, yes: 'Done' }
+        : { heading: 'Add an agent', text: 'For an agent already in this den: run this on its machine within ten minutes. It then takes orders from you and your linked devices only. A new agent first needs an invite from the den’s host or a moderator.', field: 'Command', value: `epeaky-agent owner ${code}`, readonly: true, yes: 'Done' });
+      delete el('ask').dataset.kind;
     };
   }
   const linkUse = el('link-code');

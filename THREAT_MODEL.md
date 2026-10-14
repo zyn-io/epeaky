@@ -206,6 +206,51 @@ the device is an agent: that, and whose agent it is, are said inside MLS.
   marking is what lets it tell them apart.
 - Anyone who can read the agent's folder holds its key and pass, as with a
   browser profile.
+- "Add an agent" on the page of a member who may make invites makes a
+  single-use invite (a day) and puts it in the command it shows, with the
+  code. The command is a key: whoever runs it first joins and becomes that
+  member's agent, while the page is open and within ten minutes.
+- On Windows, the agent's folder is protected by the ACL of where it lies:
+  in the user's profile (the default), only that user. Commands check that
+  the background process proves it holds the agent's secret, so a program of
+  another user's listening on its pipe cannot pass for it.
+
+## Pins
+
+A pin is a sealed document from the member who pinned it: the words, and
+which message they came from as the pinner says. Every member's device sends
+its own pins again when it sees someone join, so a newcomer gets each pin
+from its pinner's key, never passed on by someone else. A member who may
+manage messages can unpin anyone's pin in an open room; the pinner's device
+then stops sending it. A pin is known by its pinner and its id, so nobody's
+pin can stand in for another's. A pin's words are the pinner's claim: an
+agent reads a member's pin of their own words with that member's kind, and
+a pin of someone else's message as information, whoever pinned it.
+
+A device reads only what was sent after it joined, and search runs only over
+what it holds; two members, or two agents, can hold different histories.
+
+## Pushes
+
+A device that turns on notifications gives the den its browser's push address
+(Den.Push). When words land in a room it is in and it is not connected, the
+den sends a push through the browser's push service: encrypted for that
+browser (RFC 8291) and signed with the den's own key (RFC 8292), saying the
+den's name and the room's ("a private room" for one), never the words or who
+wrote them. The den sends only to Apple's, Google's, Mozilla's and
+Microsoft's push addresses, never follows a redirect, and sends at most once
+a device and room every two minutes, so a member cannot make it call an
+address of their own.
+
+The push service learns more than the words it cannot read: when a push
+reaches a device; which den sent it (the den's address and its one signing
+key, the same for all its members); and, because one message wakes a room's
+members who are away at about the same time, which of its users are likely
+in a room together. Each push waits a random few seconds to blur that, which
+helps against a casual look, not against a service that sets out to map a
+den. With pushes for private rooms only, those are small rooms: their
+members are the easier to tell. A member who does not want this keeps
+notifications to while the page is open.
 
 ## What the operator can see
 
@@ -220,6 +265,10 @@ the device is an agent: that, and whose agent it is, are said inside MLS.
 - at the door: each pass code, every day, and when it asked for tokens;
 - roles and who holds them, timeouts, kicks and bans, and the audit log of
   what moderators did (90 days; never what anyone wrote).
+- for a device with notifications on: its browser's push address, whether it
+  wants pushes for every room or private ones only, and which of its
+  documents are words (a page marks those, so they alone send pushes);
+  whose pushes are sent when.
 
 ## What nobody but members can see
 

@@ -3,18 +3,20 @@
 // line back (or, for watch, a line per message until the command goes).
 // Only this process touches the agent's MLS state.
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createWriteStream, lstatSync, mkdirSync } from 'node:fs';
 import { link, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { connect, createServer } from 'node:net';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { Agent } from './agent.mjs';
 
 /// The socket's path: in the agent's folder, or, where that path is too long
 /// for a socket, in a folder of this user's own (XDG_RUNTIME_DIR, or one made
 /// 0700 in the temporary folder and checked to be theirs) under a hash of it.
-export function socketPath(dir) {
+export function socketPath(dir, platform = process.platform) {
+  // Windows: a named pipe, named for this user and folder.
+  if (platform === 'win32') return `\\\\.\\pipe\\epeaky-agent-${createHash('sha256').update(`${userInfo().username}|${dir.toLowerCase()}`).digest('hex').slice(0, 24)}`;
   const p = join(dir, 'agent.sock');
   if (p.length < 100) return p;
   const uid = process.getuid?.() ?? 0;
@@ -25,10 +27,24 @@ export function socketPath(dir) {
   return join(base, `${createHash('sha256').update(dir).digest('hex').slice(0, 16)}.sock`);
 }
 
+/// The agent's own secret, in its folder (made once). The background process
+/// answers each command with proof that it holds it, so nothing else that
+/// listens on the agent's socket or pipe (another user, on Windows) can pass
+/// for it.
+export async function secretOf(dir) {
+  const file = join(dir, 'agent.secret');
+  try { return (await readFile(file, 'utf8')).trim(); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const s = randomBytes(32).toString('hex');
+  try { await writeFile(file, s, { mode: 0o600, flag: 'wx' }); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+  return (await readFile(file, 'utf8')).trim();
+}
+export const proofFor = (secret, nonce) => createHmac('sha256', secret).update(`epeaky-agent|${nonce}`).digest('hex');
+
 /// One process per agent: a lock file named for it, made only if there is
 /// none (link fails if it exists), and taken over only from a process that
 /// is gone.
-async function lock(dir) {
+export async function lock(dir) {
   const file = join(dir, 'agent.lock');
   const mine = `${file}.${process.pid}`;
   await writeFile(mine, String(process.pid), { mode: 0o600 });
@@ -52,13 +68,14 @@ export async function serve(dir) {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const path = socketPath(dir);
   const unlock = await lock(dir);
-  await rm(path, { force: true });
+  if (process.platform !== 'win32') await rm(path, { force: true });
   const logFile = createWriteStream(join(dir, 'agent.log'), { flags: 'a', mode: 0o600 });
   const log = (t) => logFile.write(`${new Date().toISOString()} ${t}\n`);
   const agent = new Agent(dir, log);
   try { await agent.run(); } catch (e) { log(`could not start: ${e.message}`); await new Promise((r) => logFile.end(r)); await unlock(); throw e; }
   log(`up as ${agent.me.name}`);
-  const server = createServer((sock) => talk(agent, sock, () => stop()));
+  const secret = await secretOf(dir);
+  const server = createServer((sock) => talk(agent, sock, () => stop(), secret));
   // The socket is this user's alone, wherever it lies.
   process.umask(0o077);
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(path, resolve); });
@@ -69,7 +86,7 @@ export async function serve(dir) {
     log('down');
     server.close();
     await agent.den.save().catch(() => {});
-    await rm(path, { force: true });
+    if (process.platform !== 'win32') await rm(path, { force: true });
     await unlock();
     process.exit(0);
   }
@@ -80,10 +97,17 @@ export async function serve(dir) {
   return agent;
 }
 
-function talk(agent, sock, stop) {
+function talk(agent, sock, stop, secret) {
   let buf = '';
-  // A reader that falls far behind is let go rather than held in memory.
-  const send = (o) => { if (sock.destroyed) return; sock.write(`${JSON.stringify(o)}\n`); if (sock.writableLength > 4 << 20) sock.destroy(); };
+  let proof = null;
+  // A reader that falls far behind is let go rather than held in memory. The
+  // first answer carries the proof that this is the agent's own process.
+  const send = (o) => {
+    if (sock.destroyed) return;
+    if (proof) { o = { ...o, proof }; proof = null; }
+    sock.write(`${JSON.stringify(o)}\n`);
+    if (sock.writableLength > 4 << 20) sock.destroy();
+  };
   sock.on('error', () => {});
   sock.on('data', async (chunk) => {
     buf += chunk;
@@ -94,6 +118,7 @@ function talk(agent, sock, stop) {
     buf = '';
     let req;
     try { req = JSON.parse(line); } catch { send({ ok: false, error: 'not a request' }); return sock.end(); }
+    if (typeof req.nonce === 'string' && /^[0-9a-f]{32}$/.test(req.nonce)) proof = proofFor(secret, req.nonce);
     try {
       if (req.cmd === 'watch') return watch(agent, sock, req.args || {}, send);
       send({ ok: true, data: await answer(agent, req.cmd, req.args || {}) });
@@ -115,6 +140,7 @@ async function answer(agent, cmd, a) {
     case 'send': return agent.send(a.room, a.text, a.reply);
     case 'search': return agent.search(a.q);
     case 'next': return agent.next(a);
+    case 'pins': return agent.pins(a.room);
     case 'owner':
       if (a.clear) { await agent.clearOwner(); return null; }
       if (a.code) return agent.own(a.code);
@@ -154,7 +180,7 @@ export async function ensure(dir, bin) {
   const path = socketPath(dir);
   if (await alive(path)) return path;
   try { await stat(join(dir, 'agent.json')); } catch { throw Object.assign(new Error('No agent here yet: epeaky-agent join <invite link>'), { code: 'none' }); }
-  const child = spawn(process.execPath, [bin, 'up', '--dir', dir], { detached: true, stdio: 'ignore', env: process.env });
+  const child = spawn(process.execPath, [bin, 'up', '--dir', dir], { detached: true, stdio: 'ignore', env: process.env, windowsHide: true });
   child.unref();
   const end = Date.now() + 30_000;
   while (Date.now() < end) {
@@ -167,12 +193,13 @@ export async function ensure(dir, bin) {
 
 /// One request to the background process: its answer, or, for watch, each
 /// line to `each` until the process or the caller ends it.
-export function request(path, cmd, args, each = null) {
+export function request(path, cmd, args, each = null, secret = null) {
   return new Promise((resolve, reject) => {
     const s = connect(path);
+    const nonce = randomBytes(16).toString('hex');
     let buf = '';
     let first = true;
-    s.on('connect', () => s.write(`${JSON.stringify({ cmd, args })}\n`));
+    s.on('connect', () => s.write(`${JSON.stringify({ cmd, args, nonce })}\n`));
     s.on('data', (chunk) => {
       buf += chunk;
       let nl;
@@ -181,6 +208,12 @@ export function request(path, cmd, args, each = null) {
         buf = buf.slice(nl + 1);
         if (first) {
           first = false;
+          // Only the agent's own process knows its secret.
+          const want = secret && Buffer.from(proofFor(secret, nonce));
+          if (secret && !(typeof o.proof === 'string' && o.proof.length === want.length && timingSafeEqual(Buffer.from(o.proof), want))) {
+            s.destroy();
+            return reject(Object.assign(new Error("Something other than this agent's background process answered on its socket. Stop it, and check who else can run programs on this machine."), { code: 'impostor' }));
+          }
           if (!o.ok) return reject(Object.assign(new Error(o.error), { code: o.code }));
           if (!each) return resolve(o.data);
         } else if (each && o.message) each(o.message);

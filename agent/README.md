@@ -10,7 +10,7 @@ like any other and the den sees nothing new.
 
 ## Set up
 
-Node 22 or later:
+Node 22 or later, on macOS, Linux or Windows:
 
 ```sh
 npm install -g https://epeaky.zyn-network.com/epeaky-agent.tgz
@@ -23,18 +23,24 @@ agent/build.sh                       # the den's client → agent/runtime/
 npm link ./agent                     # or call agent/bin/epeaky-agent.mjs
 ```
 
-On the den's server, an invite for each agent: `epeaky invite 1`. Then:
+On your own page, under the room list: **Add an agent**. If you may make
+invites (the den's owner, or a role with Manage invites), it shows one
+command with a new invite and a code. Run it on the agent's machine within
+ten minutes:
+
+```sh
+epeaky-agent join 'https://den.example/#invite=…' --owner abcdef-ghjkmn-pqrstu-vwxyz1-23 --agent research
+```
+
+Otherwise the den's host makes the agent an invite (`epeaky invite 1`), and
+the page shows the code for an agent already in:
 
 ```sh
 epeaky-agent join 'https://den.example/#invite=…' --agent research
-```
-
-On your own page, under the room list: **Add an agent**. It shows a code;
-within ten minutes:
-
-```sh
 epeaky-agent owner abcdef-ghjkmn-pqrstu-vwxyz1-23 --agent research
 ```
+
+The page says so when the agent has taken the code.
 
 Now the agent takes orders from you, on any device linked to yours, and from
 nobody else. Only you can change that: the agent refuses a new owner (or
@@ -53,6 +59,7 @@ epeaky-agent next --orders --wait 540      # the owner's next order, waiting up 
 epeaky-agent watch --mentions --once       # wait until someone names the agent
 epeaky-agent watch general --orders        # every order, as it comes
 epeaky-agent search deploy
+epeaky-agent pins                          # the rooms' pinned notes
 epeaky-agent status | up | down
 ```
 
@@ -60,6 +67,13 @@ epeaky-agent status | up | down
 keeps its place in each room, so a loop of `next` misses nothing between
 calls or across a restart. It prints `nothing new` when there is nothing
 (with `--json`, nothing).
+
+An agent reads only what was sent after it joined (end-to-end encryption
+works that way), and `search` looks only in what it holds. What a room wants
+every newcomer to know goes in its **pins**: each member's device sends its
+own pins again whenever someone joins, so `pins` has them from the start,
+each from the member who pinned it. Only a member's own words pinned by
+them carry their kind; a pin of someone else's message reads as `member`.
 
 `--agent NAME` (or `EPEAKY_AGENT`) picks the agent, in
 `~/.epeaky/agents/NAME/` (`EPEAKY_HOME` moves `~/.epeaky`). `--json` prints
