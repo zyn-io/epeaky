@@ -25,6 +25,12 @@ defmodule Den.Voice do
   """
   def max_peers, do: Application.get_env(:den, :voice_max_peers, 150)
 
+  @doc "Whether members may share their screen in voice (`DEN_SCREEN`, on by default)."
+  def screen?, do: Application.get_env(:den, :screen, true)
+
+  @doc "Bits a second a presenter may send (`DEN_SCREEN_BITRATE`, 2.5 Mbps)."
+  def screen_bitrate, do: Application.get_env(:den, :screen_bitrate, 2_500_000)
+
   @doc "How many people one voice room holds (`:voice_room_max`, default 50)."
   def room_max, do: Application.get_env(:den, :voice_room_max, 50)
 
@@ -119,7 +125,11 @@ defmodule Den.Voice.Room do
 
   # Who speaks is re-ranked this often (ms); a level at or under this
   # (-dBov, 127 is silence) counts as speaking, as does the voice flag.
+  alias ExWebRTC.RTP.{Munger, VP8}
+  alias ExRTCP.Packet.PayloadFeedback.{PLI, FIR}
   @tick 300
+  # Keyframes asked of the presenter: at most one a second.
+  @key_every 1_000
   @speaking 50
 
   def start_link(room), do: GenServer.start_link(__MODULE__, room, name: {:via, Registry, {Den.Voice.Registry, room}})
@@ -133,12 +143,27 @@ defmodule Den.Voice.Room do
   def join_relay(pid, channel, key), do: GenServer.call(pid, {:join_relay, channel, key}, 15_000)
   def frame(pid, channel, level, frame), do: GenServer.cast(pid, {:frame, channel, level, frame})
 
+  @doc "Ask for the stage: `:ok`, or who already presents, or why this device cannot."
+  def present(pid, channel), do: GenServer.call(pid, {:present, channel})
+  def unpresent(pid, channel), do: GenServer.cast(pid, {:unpresent, channel})
+  @doc "A viewer can open the stage now: ask the presenter for a keyframe (at most one a second)."
+  def ask_key(pid), do: GenServer.cast(pid, :ask_key)
+
+  @doc "Who presents now: their device key, or nil."
+  def presenter(pid), do: GenServer.call(pid, :presenter)
+
+  @doc """
+  End the presentation of `target` (the channel checks `by` may stop it, and
+  logs it): `{:ok, target}`, or `{:error, :none}` if `target` no longer presents.
+  """
+  def stop_screen(pid, by, target), do: GenServer.call(pid, {:stop_screen, by, target})
+
   @impl true
   def init(room) do
     # Connections are linked to this room: if it stops, they stop (and give
     # their ports back); if one fails, it is dropped, not the room.
     Process.flag(:trap_exit, true)
-    {:ok, %{room: room, peers: %{}, ticking: false}}
+    {:ok, %{room: room, peers: %{}, ticking: false, presenter: nil, screen: fresh_screen(Munger.new(:vp8, 90_000))}}
   end
 
   # A peer: its connection, its own track (once the device sends it), its
@@ -170,8 +195,38 @@ defmodule Den.Voice.Room do
         Process.monitor(channel)
         {:ok, _} = Registry.register(Den.Voice.Peers, channel, nil)
         slots = for i <- 0..(Den.Voice.slots() - 1), into: %{}, do: {"w#{i}", i}
-        peer = %{kind: :relay, pc: nil, key: key, up: nil, slots: slots, carrying: %{}, out: %{}, connected: true, candidates: 0, level: nil, spoke: nil, joined: System.monotonic_time(:millisecond), seq: 0}
+        peer = %{kind: :relay, pc: nil, key: key, up: nil, slots: slots, carrying: %{}, out: %{}, connected: true, candidates: 0, level: nil, spoke: nil, joined: System.monotonic_time(:millisecond), seq: 0, screens: false, screen_up: nil, stage: nil, stage_ready: false}
+        send(channel, {:voice, "screen", %{key: presenter_key(s)}})
         {:reply, :ok, %{s | peers: Map.put(s.peers, channel, peer)} |> assign_all([channel]) |> roster() |> tick()}
+    end
+  end
+
+  # Who presents, and their screen's stream: one munger for the room, so
+  # viewers see one stream across presenters.
+  def handle_call({:present, channel}, _from, s) do
+    p = s.peers[channel]
+
+    cond do
+      not Den.Voice.screen?() -> {:reply, {:error, :off}, s}
+      is_nil(p) or not p.screens -> {:reply, {:error, :unsupported}, s}
+      s.presenter == channel -> {:reply, :ok, s}
+      s.presenter -> {:reply, {:error, :busy, s.peers[s.presenter].key}, s}
+      true ->
+        peers = Map.new(s.peers, fn {c, q} -> {c, %{q | stage_ready: false}} end)
+        s = %{s | presenter: channel, peers: peers, screen: fresh_screen(Munger.update(s.screen.munger))}
+        {:reply, :ok, s |> tell_screen() |> want_key()}
+    end
+  end
+
+  def handle_call(:presenter, _from, s), do: {:reply, presenter_key(s), s}
+
+  # The channel logs it: this process never waits on the database.
+  def handle_call({:stop_screen, by, target}, _from, s) do
+    if s.presenter && presenter_key(s) == target do
+      send(s.presenter, {:voice, "screen_stopped", %{by: by, reason: "moderator"}})
+      {:reply, {:ok, target}, end_screen(s)}
+    else
+      {:reply, {:error, :none}, s}
     end
   end
 
@@ -183,7 +238,9 @@ defmodule Den.Voice.Room do
 
     exts = [%{type: :all, uri: "urn:ietf:params:rtp-hdrext:sdes:mid"}, %{type: :audio, uri: Den.Voice.level_uri()}]
 
-    case PeerConnection.start_link(ice_port_range: ports, ice_ip_filter: &Den.Voice.ip_ok?/1, host_to_srflx_ip_mapper: &Den.Voice.srflx/1, audio_codecs: [:opus], video_codecs: [], rtp_header_extensions: exts, controlling_process: self()) do
+    video = if Den.Voice.screen?(), do: [:vp8], else: []
+
+    case PeerConnection.start_link(ice_port_range: ports, ice_ip_filter: &Den.Voice.ip_ok?/1, host_to_srflx_ip_mapper: &Den.Voice.srflx/1, audio_codecs: [:opus], video_codecs: video, rtp_header_extensions: exts, controlling_process: self()) do
       {:ok, pc} ->
         try do
           :ok = PeerConnection.set_remote_description(pc, SessionDescription.from_json(offer))
@@ -200,15 +257,33 @@ defmodule Den.Voice.Room do
               {t.mid, track.id}
             end
 
+          # Video: the device's screen up, the stage down, when screens are on
+          # and the page offered both; otherwise any video line stays unused.
+          {screens, stage} =
+            case PeerConnection.get_transceivers(pc) |> Enum.filter(&(&1.kind == :video)) do
+              [vup, vdown | rest] when video != [] ->
+                :ok = PeerConnection.set_transceiver_direction(pc, vup.id, :recvonly)
+                track = MediaStreamTrack.new(:video)
+                :ok = PeerConnection.set_transceiver_direction(pc, vdown.id, :sendonly)
+                :ok = PeerConnection.replace_track(pc, vdown.sender.id, track)
+                for t <- rest, do: :ok = PeerConnection.set_transceiver_direction(pc, t.id, :inactive)
+                {true, track.id}
+
+              vs ->
+                for t <- vs, do: :ok = PeerConnection.set_transceiver_direction(pc, t.id, :inactive)
+                {false, nil}
+            end
+
           {:ok, answer} = PeerConnection.create_answer(pc)
           :ok = PeerConnection.set_local_description(pc, answer)
           Process.monitor(channel)
           {:ok, _} = Registry.register(Den.Voice.Peers, channel, nil)
           now = System.monotonic_time(:millisecond)
-          peer = %{kind: :rtc, pc: pc, key: key, up: nil, slots: slots, carrying: %{}, out: %{}, connected: false, candidates: 0, level: level_id(answer.sdp), spoke: nil, joined: now}
+          peer = %{kind: :rtc, pc: pc, key: key, up: nil, slots: slots, carrying: %{}, out: %{}, connected: false, candidates: 0, level: level_id(answer.sdp), spoke: nil, joined: now, screens: screens, screen_up: nil, stage: stage, stage_ready: false}
           # A connection that never connects gives its port back.
           Process.send_after(self(), {:reap, channel, pc}, Application.get_env(:den, :voice_connect_ms, 20_000))
           s = %{s | peers: Map.put(s.peers, channel, peer)} |> assign_all([channel]) |> roster() |> tick()
+          send(channel, {:voice, "screen", %{key: presenter_key(s)}})
           {:reply, {:ok, SessionDescription.to_json(answer)}, s}
         rescue
           _ -> stop_pc(pc, s, :offer)
@@ -266,6 +341,9 @@ defmodule Den.Voice.Room do
   end
 
   def handle_cast({:leave, channel}, s), do: {:noreply, drop(s, channel)}
+  def handle_cast({:unpresent, channel}, %{presenter: channel} = s), do: {:noreply, end_screen(s)}
+  def handle_cast({:unpresent, _}, s), do: {:noreply, s}
+  def handle_cast(:ask_key, s), do: {:noreply, want_key(s)}
 
   # A relayed device's frame: forwarded as the RTP packet it would have been.
   def handle_cast({:frame, channel, level, frame}, s) do
@@ -309,6 +387,8 @@ defmodule Den.Voice.Room do
   def handle_info(:stop_if_empty, %{peers: peers} = s) when map_size(peers) == 0, do: {:stop, :normal, s}
 
   # Re-rank who speaks, while there are more people than slots.
+  # The ask that waited for the second to pass.
+  def handle_info(:want_key, s), do: {:noreply, want_key(%{s | screen: %{s.screen | again: false, key_at: nil}})}
   def handle_info(:tick, s), do: {:noreply, %{s | ticking: false} |> assign_all() |> tick()}
   def handle_info(_, s), do: {:noreply, s}
 
@@ -317,8 +397,31 @@ defmodule Den.Voice.Room do
     s
   end
 
-  defp on_pc({:track, %MediaStreamTrack{id: id}}, channel, peer, s) do
-    put_in(s.peers[channel], %{peer | up: id})
+  defp on_pc({:track, %MediaStreamTrack{id: id, kind: :audio}}, channel, peer, s), do: put_in(s.peers[channel], %{peer | up: id})
+  defp on_pc({:track, %MediaStreamTrack{id: id, kind: :video}}, channel, peer, s), do: put_in(s.peers[channel], %{peer | screen_up: id})
+
+  # The presenter's screen: through the room's one munger, to every viewer
+  # that has had a keyframe. Anyone else's video goes nowhere.
+  defp on_pc({:rtp, id, _rid, packet}, channel, %{screen_up: id}, %{presenter: channel} = s) do
+    s = count(s, byte_size(packet.payload))
+
+    if s.presenter != channel do
+      s
+    else
+      key? = VP8.keyframe?(packet)
+      s = %{s | screen: %{s.screen | seen: true}}
+      # A stream not yet started on a keyframe, or one a viewer asked of
+      # before the den knew it: ask for a keyframe now. A keyframe answers it.
+      s = if key?, do: %{s | screen: %{s.screen | wanted: false}}, else: if(s.screen.wanted or not s.screen.live, do: want_key(s), else: s)
+      if s.screen.live or key?, do: show(s, channel, packet, key?), else: s
+    end
+  end
+
+  defp on_pc({:rtp, id, _rid, _packet}, _channel, %{screen_up: id}, s) when not is_nil(id), do: s
+
+  # A viewer's decoder asks for a keyframe: passed on to the presenter, within the limit.
+  defp on_pc({:rtcp, packets}, _channel, _peer, s) do
+    if Enum.any?(packets, fn {_, p} -> is_struct(p, PLI) or is_struct(p, FIR) end), do: want_key(s), else: s
   end
 
   # Audio from one device: into its slot on the connection of everyone who
@@ -331,7 +434,8 @@ defmodule Den.Voice.Room do
   end
 
   defp on_pc({:connection_state_change, :failed}, channel, _peer, s), do: drop(s, channel)
-  defp on_pc({:connection_state_change, :connected}, channel, peer, s), do: put_in(s.peers[channel], %{peer | connected: true})
+  # A viewer that connects starts on the next keyframe, which is asked for now.
+  defp on_pc({:connection_state_change, :connected}, channel, peer, s), do: put_in(s.peers[channel], %{peer | connected: true, stage_ready: false}) |> want_key()
   defp on_pc(_, _, _, s), do: s
 
   # By the level the browser measured; without one, by size: a frame of
@@ -421,12 +525,82 @@ defmodule Den.Voice.Room do
 
   defp tick(s), do: s
 
+  defp fresh_screen(munger), do: %{munger: munger, live: false, seen: false, wanted: false, key_at: nil, again: false, bytes: 0, since: System.monotonic_time(:millisecond)}
+
+  defp presenter_key(%{presenter: nil}), do: nil
+  defp presenter_key(s), do: s.peers[s.presenter].key
+
+  defp end_screen(s), do: %{s | presenter: nil} |> tell_screen()
+
+  defp tell_screen(s) do
+    key = presenter_key(s)
+    for {c, _} <- s.peers, do: send(c, {:voice, "screen", %{key: key}})
+    s
+  end
+
+  defp show(s, presenter, packet, key?) do
+    {packet, munger} = Munger.munge(s.screen.munger, packet)
+    s = %{s | screen: %{s.screen | munger: munger, live: true}}
+
+    Enum.reduce(s.peers, s, fn {c, q}, s ->
+      cond do
+        c == presenter or is_nil(q.stage) -> s
+        q.stage_ready -> send_stage(s, q, packet)
+        key? -> send_stage(s, q, packet) |> put_in([:peers, c, :stage_ready], true)
+        true -> s
+      end
+    end)
+  end
+
+  defp send_stage(s, q, packet) do
+    PeerConnection.send_rtp(q.pc, q.stage, packet)
+    s
+  end
+
+  defp want_key(%{presenter: nil} = s), do: s
+  # A PLI names the stream, so it waits until the den has had a packet of it.
+  defp want_key(%{screen: %{seen: false}} = s), do: %{s | screen: %{s.screen | wanted: true}}
+
+  defp want_key(s) do
+    now = System.monotonic_time(:millisecond)
+    p = s.peers[s.presenter]
+
+    cond do
+      s.screen.key_at && now - s.screen.key_at < @key_every ->
+        # Asked within the second: once more when it is up.
+        unless s.screen.again, do: Process.send_after(self(), :want_key, @key_every - (now - s.screen.key_at))
+        %{s | screen: %{s.screen | again: true}}
+
+      true ->
+        PeerConnection.send_pli(p.pc, p.screen_up)
+        %{s | screen: %{s.screen | key_at: now, again: false, wanted: false}}
+    end
+  end
+
+  # The guard: over twice the bitrate in a 5-second window ends the presentation,
+  # so one device cannot multiply its upload by every viewer.
+  defp count(s, n) do
+    now = System.monotonic_time(:millisecond)
+    sc = s.screen
+    {bytes, since} = if now - sc.since > 5_000, do: {n, now}, else: {sc.bytes + n, sc.since}
+    s = %{s | screen: %{sc | bytes: bytes, since: since}}
+
+    if bytes * 8 > 2 * Den.Voice.screen_bitrate() * 5 do
+      send(s.presenter, {:voice, "screen_stopped", %{by: nil, reason: "too fast"}})
+      end_screen(s)
+    else
+      s
+    end
+  end
+
   defp drop(s, channel) do
     case Map.pop(s.peers, channel) do
       {nil, _} ->
         s
 
       {p, rest} ->
+        s = if s.presenter == channel, do: end_screen(s), else: s
+
         if p.pc do
           Process.unlink(p.pc)
           catch_exit(fn -> PeerConnection.stop(p.pc) end)

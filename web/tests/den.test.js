@@ -181,3 +181,63 @@ test('a second message from one device inside the slow mode window is not shown'
   assert.equal(tooSoon([], { t: 'msg', key: k, srv: 1010 }, 30), false);
   assert.equal(tooSoon(log, { t: 'msg', key: k }, 30), false, 'from a den that gives no time');
 });
+
+test('screen frames keep VP8 bytes in the clear, sealed to them; voice frames are as before', async () => {
+  const { webcrypto } = await import('node:crypto');
+  globalThis.crypto ??= webcrypto;
+  const { clearLength, sealFrame, openFrame, Window } = await import('../dist/den/media-seal.js');
+  const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  const other = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  const keyframe = Uint8Array.from({ length: 300 }, (_, i) => (i === 0 ? 0x10 : i));
+  const delta = Uint8Array.from({ length: 300 }, (_, i) => (i === 0 ? 0x11 : i));
+  assert.equal(clearLength(keyframe, 'screen'), 10);
+  assert.equal(clearLength(delta, 'screen'), 3);
+  assert.equal(clearLength(keyframe, 'audio'), 0);
+  assert.throws(() => clearLength(new Uint8Array(2), 'screen'));
+  const n = BigInt(Date.now()) * 1000n;
+  for (const f of [keyframe, delta]) {
+    const c = clearLength(f, 'screen');
+    const sealed = await sealFrame(key, 7, n, f, c);
+    assert.deepEqual(sealed.subarray(0, c), f.subarray(0, c), 'the clear prefix is as it was');
+    assert.notDeepEqual(sealed.subarray(c, c + 20), f.subarray(c, c + 20), 'the rest is not');
+    const back = await openFrame(key, sealed, c);
+    assert.deepEqual(back.plain, f);
+    assert.equal(back.index, 7);
+    const bent = sealed.slice(); bent[1] ^= 1;
+    await assert.rejects(openFrame(key, bent, c), 'a changed clear byte does not open');
+    await assert.rejects(openFrame(other, sealed, c), "another sender's key does not open");
+  }
+  // Voice: no clear bytes, the layout of before.
+  const voice = Uint8Array.from({ length: 80 }, (_, i) => i);
+  const sv = await sealFrame(key, 1, n, voice, 0);
+  assert.equal(sv.length, voice.length + 16 + 21);
+  assert.deepEqual((await openFrame(key, sv, 0)).plain, voice);
+  const w = new Window();
+  assert.ok(w.fresh('s', 10n) && w.fresh('s', 12n) && w.fresh('s', 11n));
+  assert.ok(!w.fresh('s', 11n), 'a counter seen is refused');
+});
+
+test('the page has a stage for a shared screen and a button to share one', async () => {
+  const html = await read('../index.html');
+  for (const id of ['voice-screen', 'stage', 'stage-video', 'stage-who', 'stage-full', 'stage-stop', 'stage-note']) assert.match(html, new RegExp(`id="${id}"`), id);
+  const ui = await read('../den-ui.js');
+  assert.match(ui, /Share screen/);
+  assert.match(ui, /is sharing their screen/);
+  assert.match(ui, /Screen sharing needs a direct connection\. This network only lets voice through\./);
+});
+
+test('the replay window takes a late frame it has not seen, by send time in µs, and refuses one seen or too old', async () => {
+  const { Window } = await import('../dist/den/media-seal.js');
+  const w = new Window();
+  const t0 = BigInt(Date.now()) * 1000n;
+  assert.ok(w.fresh('s', t0));
+  assert.ok(w.fresh('s', t0 + 133_000n), 'two frames on (15 fps)');
+  assert.ok(w.fresh('s', t0 + 66_000n), 'the frame between, completed late after a resend, is taken');
+  assert.ok(!w.fresh('s', t0 + 66_000n), 'but only once');
+  assert.ok(!w.fresh('s', t0 + 133_000n), 'the newest is not taken twice either');
+  assert.ok(!w.fresh('s', t0 - 3_000_000n), 'one from seconds before the newest is refused');
+  // Many frames: what it keeps stays small.
+  for (let i = 1; i <= 5000; i++) w.fresh('s', t0 + 133_000n + BigInt(i) * 20_000n);
+  assert.ok(w.seen.get('s').size <= 512, `it keeps at most 512 counters (${w.seen.get('s').size})`);
+  assert.ok(w.fresh('t', t0), 'each sender has its own window');
+});

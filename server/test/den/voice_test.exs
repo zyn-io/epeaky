@@ -5,18 +5,133 @@ defmodule Den.VoiceTest do
   use ExUnit.Case, async: false
   alias ExWebRTC.{MediaStreamTrack, PeerConnection, SessionDescription}
 
-  defp device do
-    {:ok, pc} = PeerConnection.start(audio_codecs: [:opus], video_codecs: [])
+  defp device(opts \\ []) do
+    {:ok, pc} = PeerConnection.start(audio_codecs: [:opus], video_codecs: if(opts[:video], do: [:vp8], else: []))
     {:ok, _} = PeerConnection.add_track(pc, MediaStreamTrack.new(:audio))
     [up] = PeerConnection.get_transceivers(pc)
     :ok = PeerConnection.set_transceiver_direction(pc, up.id, :sendonly)
     for _ <- 1..Den.Voice.slots(), do: {:ok, _} = PeerConnection.add_transceiver(pc, :audio, direction: :recvonly)
+    if opts[:video] do
+      {:ok, _} = PeerConnection.add_track(pc, MediaStreamTrack.new(:video))
+      v = PeerConnection.get_transceivers(pc) |> Enum.find(&(&1.kind == :video))
+      :ok = PeerConnection.set_transceiver_direction(pc, v.id, :sendonly)
+      {:ok, _} = PeerConnection.add_transceiver(pc, :video, direction: :recvonly)
+    end
     {:ok, offer} = PeerConnection.create_offer(pc)
     :ok = PeerConnection.set_local_description(pc, offer)
     {pc, SessionDescription.to_json(offer)}
   end
 
+  # Each media line of an SDP: its kind, port and direction.
+  defp media(sdp) do
+    sdp
+    |> String.split(~r/\r?\nm=/)
+    |> Enum.drop(1)
+    |> Enum.map(fn sec ->
+      [kind, port | _] = String.split(sec, " ")
+      dir = Regex.run(~r/a=(sendonly|recvonly|sendrecv|inactive)/, sec, capture: :all_but_first) |> List.wrap() |> List.first()
+      {kind, port, dir}
+    end)
+  end
+
   defp directions(sdp), do: Regex.scan(~r/a=(sendonly|recvonly|sendrecv|inactive)/, sdp, capture: :all_but_first) |> List.flatten()
+
+  test "screen sharing is on by default at 2.5 Mbps, and the host can turn it off" do
+    Application.delete_env(:den, :screen)
+    Application.delete_env(:den, :screen_bitrate)
+    assert Den.Voice.screen?()
+    assert Den.Voice.screen_bitrate() == 2_500_000
+    Application.put_env(:den, :screen, false)
+    refute Den.Voice.screen?()
+    Application.delete_env(:den, :screen)
+  end
+
+  test "an offer with a screen and a stage is answered with VP8: the den takes the screen and sends the stage" do
+    {:ok, room} = Den.Voice.ensure("screen-answer")
+    {pc, offer} = device(video: true)
+    {:ok, answer} = Den.Voice.Room.join(room, self(), "key-a", offer)
+    videos = for {"video", port, dir} <- media(answer["sdp"]), do: {port, dir}
+    assert [{p1, "recvonly"}, {p2, "sendonly"}] = videos
+    assert p1 != "0" and p2 != "0"
+    assert answer["sdp"] =~ "VP8/90000"
+    refute answer["sdp"] =~ ~r/H264|AV1/
+    PeerConnection.stop(pc)
+  end
+
+  test "an offer without video (a page from before screens) still joins voice" do
+    {:ok, room} = Den.Voice.ensure("screen-old")
+    {pc, offer} = device()
+    assert {:ok, answer} = Den.Voice.Room.join(room, self(), "key-a", offer)
+    refute answer["sdp"] =~ "m=video"
+    PeerConnection.stop(pc)
+  end
+
+  test "with screens off the video lines are refused and voice works" do
+    Application.put_env(:den, :screen, false)
+    on_exit(fn -> Application.delete_env(:den, :screen) end)
+    {:ok, room} = Den.Voice.ensure("screen-off")
+    {pc, offer} = device(video: true)
+    {:ok, answer} = Den.Voice.Room.join(room, self(), "key-a", offer)
+    videos = for {"video", port, dir} <- media(answer["sdp"]), do: {port, dir}
+    assert videos != [] and Enum.all?(videos, fn {port, dir} -> port == "0" or dir == "inactive" end), inspect(videos)
+    PeerConnection.stop(pc)
+  end
+
+  test "one presenter at a time; the stage is freed when they stop or leave" do
+    {:ok, room} = Den.Voice.ensure("screen-who")
+    {pc_a, offer_a} = device(video: true)
+    {pc_b, offer_b} = device(video: true)
+    me = self()
+    b = spawn_link(fn -> receive do: (:stop -> :ok) end)
+    {:ok, _} = Den.Voice.Room.join(room, me, "key-a", offer_a)
+    assert_receive {:voice, "screen", %{key: nil}}
+    {:ok, _} = Den.Voice.Room.join(room, b, "key-b", offer_b)
+
+    assert :ok = Den.Voice.Room.present(room, me)
+    assert_receive {:voice, "screen", %{key: "key-a"}}
+    assert {:error, :busy, "key-a"} = Den.Voice.Room.present(room, b)
+
+    Den.Voice.Room.unpresent(room, me)
+    assert_receive {:voice, "screen", %{key: nil}}
+    assert :ok = Den.Voice.Room.present(room, b)
+    assert_receive {:voice, "screen", %{key: "key-b"}}
+
+    # The presenter's process going away frees the stage.
+    send(b, :stop)
+    assert_receive {:voice, "screen", %{key: nil}}, 2_000
+    PeerConnection.stop(pc_a)
+    PeerConnection.stop(pc_b)
+  end
+
+  test "a device without a screen line, a relayed device, or screens off cannot present" do
+    {:ok, room} = Den.Voice.ensure("screen-cannot")
+    {pc, offer} = device()
+    {:ok, _} = Den.Voice.Room.join(room, self(), "key-a", offer)
+    assert {:error, :unsupported} = Den.Voice.Room.present(room, self())
+    r = spawn_link(fn -> receive do: (:stop -> :ok) end)
+    :ok = Den.Voice.Room.join_relay(room, r, "key-r")
+    assert {:error, :unsupported} = Den.Voice.Room.present(room, r)
+    Application.put_env(:den, :screen, false)
+    on_exit(fn -> Application.delete_env(:den, :screen) end)
+    assert {:error, :off} = Den.Voice.Room.present(room, self())
+    send(r, :stop)
+    PeerConnection.stop(pc)
+  end
+
+  test "stop_screen ends a presentation and tells the presenter who" do
+    {:ok, room} = Den.Voice.ensure("screen-stop")
+    {pc, offer} = device(video: true)
+    {:ok, _} = Den.Voice.Room.join(room, self(), "key-a", offer)
+    :ok = Den.Voice.Room.present(room, self())
+    assert {:error, :none} = Den.Voice.Room.stop_screen(room, "key-b", "key-x")
+    assert "key-a" = Den.Voice.Room.presenter(room)
+    assert {:ok, "key-a"} = Den.Voice.Room.stop_screen(room, "key-b", "key-a")
+    assert_receive {:voice, "screen_stopped", %{by: "key-b", reason: "moderator"}}
+    assert_receive {:voice, "screen", %{key: nil}}
+    assert {:error, :none} = Den.Voice.Room.stop_screen(room, "key-b", "key-a")
+    assert nil == Den.Voice.Room.presenter(room)
+    PeerConnection.stop(pc)
+  end
 
   test "two devices join a room's voice and each is given the other's slot" do
     {:ok, room} = Den.Voice.ensure("voice-test")
@@ -126,22 +241,38 @@ defmodule Den.VoiceTest do
   # A device played by ex_webrtc over a real connection to the den: its own
   # process (the "channel"), relaying ICE both ways, telling the test about
   # slots, the roster and the packets that reach it.
-  defp live_device(room, key, test) do
+  defp live_device(room, key, test, video \\ false) do
     spawn_link(fn ->
       exts = [%{type: :all, uri: "urn:ietf:params:rtp-hdrext:sdes:mid"}, %{type: :audio, uri: Den.Voice.level_uri()}]
-      {:ok, pc} = PeerConnection.start_link(audio_codecs: [:opus], video_codecs: [], rtp_header_extensions: exts)
+      {:ok, pc} = PeerConnection.start_link(audio_codecs: [:opus], video_codecs: if(video, do: [:vp8], else: []), rtp_header_extensions: exts)
       track = MediaStreamTrack.new(:audio)
       {:ok, _} = PeerConnection.add_track(pc, track)
       [up] = PeerConnection.get_transceivers(pc)
       :ok = PeerConnection.set_transceiver_direction(pc, up.id, :sendonly)
       for _ <- 1..Den.Voice.slots(), do: {:ok, _} = PeerConnection.add_transceiver(pc, :audio, direction: :recvonly)
+
+      # With `video`, a screen up and a stage down, as the page offers them.
+      {screen, stage_t} =
+        if video do
+          vt = MediaStreamTrack.new(:video)
+          {:ok, _} = PeerConnection.add_track(pc, vt)
+          v = PeerConnection.get_transceivers(pc) |> Enum.find(&(&1.kind == :video))
+          :ok = PeerConnection.set_transceiver_direction(pc, v.id, :sendonly)
+          {:ok, st} = PeerConnection.add_transceiver(pc, :video, direction: :recvonly)
+          {vt.id, st.id}
+        else
+          {nil, nil}
+        end
+
       {:ok, offer} = PeerConnection.create_offer(pc)
       :ok = PeerConnection.set_local_description(pc, offer)
       [_, level] = Regex.run(~r/a=extmap:(\d+) #{Regex.escape(Den.Voice.level_uri())}/, offer.sdp)
       {:ok, answer} = Den.Voice.Room.join(room, self(), key, SessionDescription.to_json(offer))
       :ok = PeerConnection.set_remote_description(pc, SessionDescription.from_json(answer))
-      mids = for t <- PeerConnection.get_transceivers(pc), t.direction == :recvonly, into: %{}, do: {t.receiver.track.id, t.mid}
-      loop(%{pc: pc, room: room, key: key, test: test, track: track.id, level: String.to_integer(level), mids: mids, seq: 0})
+      ts = PeerConnection.get_transceivers(pc)
+      mids = for t <- ts, t.direction == :recvonly, t.kind == :audio, into: %{}, do: {t.receiver.track.id, t.mid}
+      stage = Enum.find_value(ts, fn t -> t.id == stage_t && t.receiver.track.id end)
+      loop(%{pc: pc, room: room, key: key, test: test, track: track.id, level: String.to_integer(level), mids: mids, seq: 0, screen: screen, stage: stage, vseq: 0})
     end)
   end
 
@@ -172,9 +303,42 @@ defmodule Den.VoiceTest do
         send(d.test, {d.key, :connected})
         loop(d)
 
+      {:ex_webrtc, _, {:rtp, track, _, packet}} when track == d.stage and not is_nil(track) ->
+        send(d.test, {d.key, :stage, packet.sequence_number, ExWebRTC.RTP.VP8.keyframe?(packet)})
+        loop(d)
+
       {:ex_webrtc, _, {:rtp, track, _, packet}} ->
         send(d.test, {d.key, :rtp, d.mids[track], packet.sequence_number})
         loop(d)
+
+      {:ex_webrtc, _, {:rtcp, packets}} ->
+        for {_, %ExRTCP.Packet.PayloadFeedback.PLI{}} <- packets, do: send(d.test, {d.key, :pli})
+        loop(d)
+
+      :pli ->
+        PeerConnection.send_pli(d.pc, d.stage)
+        loop(d)
+
+      {:show, n, first_key} ->
+        for i <- 1..n do
+          key = first_key and i == 1
+          # VP8 payload descriptor (S=1, PID 0), then a frame whose first byte's bit 0 is 0 on a keyframe.
+          payload = <<0x10, if(key, do: 0x00, else: 0x01), 0, 0>> <> :binary.copy(<<7>>, 200)
+          packet = ExRTP.Packet.new(payload, payload_type: 96, sequence_number: d.vseq + i, timestamp: (d.vseq + i) * 6000, ssrc: 2, marker: true)
+          PeerConnection.send_rtp(d.pc, d.screen, packet)
+          Process.sleep(10)
+        end
+
+        loop(%{d | vseq: d.vseq + n})
+
+      {:show_big, n} ->
+        for i <- 1..n do
+          packet = ExRTP.Packet.new(<<0x10, 0x01, 0, 0>> <> :binary.copy(<<7>>, 1_196), payload_type: 96, sequence_number: d.vseq + i, timestamp: (d.vseq + i) * 3000, ssrc: 2)
+          PeerConnection.send_rtp(d.pc, d.screen, packet)
+          Process.sleep(5)
+        end
+
+        loop(%{d | vseq: d.vseq + n})
 
       {:speak, n, voice} ->
         for i <- 1..n do
@@ -225,6 +389,83 @@ defmodule Den.VoiceTest do
     end
     assert seqs == Enum.sort(seqs) and List.last(seqs) - hd(seqs) < 30, "one stream, its numbers rising: #{inspect(seqs)}"
     for {_, d} <- devices, do: send(d, :stop)
+  end
+
+  test "viewers get only the presenter's screen, from a keyframe, as one stream; the presenter gets none" do
+    {:ok, room} = Den.Voice.ensure("screen-fwd")
+    devs = for k <- ~w(key-a key-b key-c), into: %{}, do: {k, live_device(room, k, self(), true)}
+    for k <- Map.keys(devs), do: assert_receive({^k, :connected}, 15_000)
+    on_exit(fn -> for {_, d} <- devs, do: send(d, :stop) end)
+
+    :ok = Den.Voice.Room.present(room, devs["key-a"])
+    # Not the presenter: dropped.
+    send(devs["key-b"], {:show, 5, true})
+    # The presenter: delta frames first (no viewer may start on them), then a keyframe and more.
+    send(devs["key-a"], {:show, 3, false})
+    send(devs["key-a"], {:show, 10, true})
+
+    got = for _ <- 1..10, do: (assert_receive({"key-b", :stage, seq, key?}, 3_000); {seq, key?})
+    assert elem(hd(got), 1), "a viewer starts on a keyframe"
+    seqs = Enum.map(got, &elem(&1, 0))
+    assert seqs == Enum.to_list(hd(seqs)..(hd(seqs) + 9)), "one stream: #{inspect(seqs)}"
+    assert_receive {"key-c", :stage, _, true}, 3_000
+    refute_received {"key-a", :stage, _, _}
+    refute_receive {"key-b", :stage, _, _}, 300
+  end
+
+  test "a stream without a keyframe and a late viewer ask the presenter for one; viewers' asks at most once a second" do
+    {:ok, room} = Den.Voice.ensure("screen-pli")
+    a = live_device(room, "key-a", self(), true)
+    on_exit(fn -> send(a, :stop) end)
+    assert_receive {"key-a", :connected}, 15_000
+    :ok = Den.Voice.Room.present(room, a)
+    # The stream starts on delta frames: the den asks for a keyframe.
+    send(a, {:show, 3, false})
+    assert_receive {"key-a", :pli}, 2_000
+    send(a, {:show, 5, true})
+    Process.sleep(1_100)
+    # A viewer who connects late: asked for at once.
+    d = live_device(room, "key-d", self(), true)
+    on_exit(fn -> send(d, :stop) end)
+    assert_receive {"key-d", :connected}, 15_000
+    assert_receive {"key-a", :pli}, 1_000
+    send(a, {:show, 5, true})
+    assert_receive {"key-d", :stage, _, true}, 3_000
+    Process.sleep(1_100)
+    # The viewer's decoder asks three times at once: one PLI now, one a second later, no more.
+    for _ <- 1..3, do: send(d, :pli)
+    assert_receive {"key-a", :pli}, 500
+    refute_receive {"key-a", :pli}, 600
+    assert_receive {"key-a", :pli}, 1_000
+    refute_receive {"key-a", :pli}, 1_200
+  end
+
+  test "a viewer that has the presenter's key asks for a keyframe, within the limit" do
+    {:ok, room} = Den.Voice.ensure("screen-ask")
+    a = live_device(room, "key-a", self(), true)
+    on_exit(fn -> send(a, :stop) end)
+    assert_receive {"key-a", :connected}, 15_000
+    :ok = Den.Voice.Room.present(room, a)
+    send(a, {:show, 5, true})
+    Process.sleep(1_100)
+    Den.Voice.Room.ask_key(room)
+    assert_receive {"key-a", :pli}, 1_000
+    Den.Voice.Room.ask_key(room)
+    refute_receive {"key-a", :pli}, 600
+  end
+
+  test "a presenter sending far above the bitrate is stopped" do
+    Application.put_env(:den, :screen_bitrate, 300_000)
+    on_exit(fn -> Application.delete_env(:den, :screen_bitrate) end)
+    {:ok, room} = Den.Voice.ensure("screen-fast")
+    a = live_device(room, "key-a", self(), true)
+    on_exit(fn -> send(a, :stop) end)
+    assert_receive {"key-a", :connected}, 15_000
+    :ok = Den.Voice.Room.present(room, a)
+    # 400 × 1,200 bytes is 3.84 Mbit in about 2 s, over 2 × 0.3 Mbps × 5 s (3 Mbit).
+    send(a, {:show_big, 400})
+    assert_receive {"key-a", "screen_stopped", %{by: nil, reason: "too fast"}}, 8_000
+    assert_receive {"key-a", "screen", %{key: nil}}, 1_000
   end
 
   test "a device whose network lets no WebRTC through hears and is heard over its channel" do
