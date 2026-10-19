@@ -81,6 +81,52 @@ const plainText = (s) => String(s ?? '').replace(/[\t\n\r]/g, ' ').replace(/[\u0
 // Shown in place only these; anything else (SVG, HTML, …) is a download.
 const INLINE = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif']);
 
+/// An invite link for a command to run: the code (hex) from the link the den
+/// made, on this page's own origin, so nothing else the den put in it reaches
+/// a shell.
+export function inviteLink(link, origin) {
+  const code = typeof link === 'string' ? /#invite=([0-9a-f]{16,128})$/.exec(link)?.[1] : null;
+  return code ? `${origin}/#invite=${code}` : null;
+}
+
+/// An image's width and height from its header (PNG, GIF, JPEG, WebP, AVIF),
+/// read before anything decodes it, so a huge one is refused unopened; null
+/// for a header it does not know.
+export function imageSize(b) {
+  const u16 = (i) => (b[i] << 8) | b[i + 1];
+  const u32 = (i) => ((b[i] << 24) >>> 0) + (b[i + 1] << 16) + (b[i + 2] << 8) + b[i + 3];
+  const str = (i, n) => String.fromCharCode(...b.subarray(i, i + n));
+  if (b.length >= 24 && b[0] === 0x89 && str(1, 3) === 'PNG' && str(12, 4) === 'IHDR') return { w: u32(16), h: u32(20) };
+  if (b.length >= 10 && str(0, 3) === 'GIF') return { w: b[6] | (b[7] << 8), h: b[8] | (b[9] << 8) };
+  if (b.length >= 4 && b[0] === 0xff && b[1] === 0xd8) {
+    for (let i = 2; i + 9 < b.length;) {
+      if (b[i] !== 0xff) return null;
+      const t = b[i + 1];
+      if (t === 0xff) { i += 1; continue; }
+      if (t >= 0xc0 && t <= 0xcf && t !== 0xc4 && t !== 0xc8 && t !== 0xcc) return { w: u16(i + 7), h: u16(i + 5) };
+      if (t === 0xd8 || (t >= 0xd0 && t <= 0xd7) || t === 0x01) { i += 2; continue; }
+      i += 2 + u16(i + 2);
+    }
+    return null;
+  }
+  if (b.length >= 30 && str(0, 4) === 'RIFF' && str(8, 4) === 'WEBP') {
+    const c = str(12, 4);
+    if (c === 'VP8X') return { w: 1 + (b[24] | (b[25] << 8) | (b[26] << 16)), h: 1 + (b[27] | (b[28] << 8) | (b[29] << 16)) };
+    if (c === 'VP8 ' && b[23] === 0x9d && b[24] === 0x01 && b[25] === 0x2a) return { w: (b[26] | (b[27] << 8)) & 0x3fff, h: (b[28] | (b[29] << 8)) & 0x3fff };
+    if (c === 'VP8L' && b[20] === 0x2f) return { w: 1 + (b[21] | ((b[22] & 0x3f) << 8)), h: 1 + ((b[22] >> 6) | (b[23] << 2) | ((b[24] & 0x0f) << 10)) };
+    return null;
+  }
+  // AVIF (ISOBMFF): the largest 'ispe' (image spatial extents) box it holds.
+  let best = null;
+  for (let i = 4; i + 16 <= b.length && i < 1 << 20; i++) {
+    if (b[i] === 0x69 && str(i, 4) === 'ispe') {
+      const s = { w: u32(i + 8), h: u32(i + 12) };
+      if (!best || s.w * s.h > best.w * best.h) best = s;
+    }
+  }
+  return best;
+}
+
 /// A file message's fields as another device sent them, checked: a den blob
 /// id, a 32-byte key, a 12-byte iv, a size in range, a plain name. Null if
 /// any is wrong.
@@ -136,6 +182,12 @@ function store(name, prefix) {
     del: (k) => tx('readwrite', (s) => s.delete(`${prefix}:${k}`)),
   };
 }
+
+/// A message's id: 16 hex characters, or `old-` and 12 for words an older
+/// device sent bare. Nothing longer is kept in anyone's log.
+const MSG_ID = /^(?:[0-9a-f]{16}|old-[0-9a-f]{12})$/;
+/// The largest document a page sends (a pinner's pins again, at most).
+const DOC_MAX = 256 * 1024;
 
 /// A room message's body, decoded: older devices sent bare words.
 function decode(text) {
@@ -445,7 +497,9 @@ export class DenClient {
 
   addRoom(r) {
     // A room's id as dens make them; anything else from a den is not taken.
-    if (typeof r?.id !== 'string' || !ROOM_ID.test(r.id)) return;
+    // The lobby lists open rooms only: a private room (p-…) comes from an
+    // invitation, and nothing the den says renames, reopens or replaces one.
+    if (typeof r?.id !== 'string' || !ROOM_ID.test(r.id) || r.id.startsWith('p-') || this.rooms.get(r.id)?.kind === 'private') return;
     this.rooms.set(r.id, { ...this.rooms.get(r.id), ...r });
     this.on('rooms', [...this.rooms.values()]);
     this.joinRoom(r.id);
@@ -453,7 +507,7 @@ export class DenClient {
 
   /// A moderator deleted an open room: gone here too, with its words.
   dropRoom(id) {
-    if (!this.rooms.has(id) || this.rooms.get(id).kind === 'private') return;
+    if (typeof id !== 'string' || id.startsWith('p-') || !this.rooms.has(id) || this.rooms.get(id).kind === 'private') return;
     this.channels.get(id)?.leave();
     this.channels.delete(id);
     this.joined.delete(id);
@@ -525,8 +579,11 @@ export class DenClient {
   /// A moderator's deletion of someone else's message (by its number).
   modDelete(room, seq) { return this.push(this.channels.get(room), 'delete', { seq }); }
 
-  /// The den deleted a message (a moderator did): gone here too.
+  /// The den deleted a message (a moderator did): gone here too. Only in an
+  /// open room: the den deletes nothing in a private one, so a "deleted"
+  /// there is not taken.
   async deleted(room, seq) {
+    if (/^p-/.test(room) || this.rooms.get(room)?.kind === 'private') return;
     const log = await this.log(room);
     const m = log.find((x) => x.seq === seq && (x.t === 'msg' || x.t === 'file'));
     if (!m) return;
@@ -659,6 +716,7 @@ export class DenClient {
       return; // before this device joined, or its own
     }
     if (ev.kind === 'text') {
+      if (typeof ev.text !== 'string' || ev.text.length > DOC_MAX) { this.saveSoon(); return; }
       const d = decode(ev.text);
       await this.apply(room, { ...d, from: ev.from, key: ev.key, seq: m.seq, at: sent(d.at), srv: m.at });
     } else if (ev.kind === 'commit') {
@@ -700,8 +758,12 @@ export class DenClient {
     }
     if (typeof m.pin !== 'string' || !/^[0-9a-f]{16}$/.test(m.pin)) return;
     const pins = await this.pinsOf(room);
+    // Pins a moderator took down, remembered here so their pinner cannot
+    // put them back by sending them again.
+    const down = (await this.kv.get(`unpinned:${room}`)) || [];
     if (m.t === 'pin') {
       if (pins.some((p) => p.pin === m.pin && p.by === by) || typeof m.text !== 'string' || !m.text.trim()) return;
+      if (down.includes(`${by}|${m.pin}`)) return;
       if (pins.filter((p) => p.by === by).length >= 20 || pins.length >= 200) return;
       // When it was pinned (the pinner's clock), kept as it is sent again.
       // `author`: whose message it was, as the pinner says (`from` is every
@@ -713,6 +775,7 @@ export class DenClient {
       const mod = this.can('manage_messages', by) && this.rooms.get(room)?.kind !== 'private';
       if (i < 0 || (pinner !== by && !mod)) return;
       pins.splice(i, 1);
+      if (pinner !== by) await this.kv.put(`unpinned:${room}`, [...down, `${pinner}|${m.pin}`].slice(-1000));
     }
     await this.kv.put(`pins:${room}`, pins);
     this.on('pins', { room });
@@ -846,7 +909,7 @@ export class DenClient {
     const at = (id) => log.findIndex((x) => x.id === id);
     let shown = null;
     if (m.t === 'msg' || m.t === 'file') {
-      if (typeof m.id !== 'string' || at(m.id) >= 0) return;
+      if (typeof m.id !== 'string' || !MSG_ID.test(m.id) || at(m.id) >= 0) return;
       // Faster than the room's slow mode lets anyone write: not shown.
       if (!mine && !this.can('bypass_slow', m.key) && tooSoon(log, m, this.slowOf(room))) return;
       // Every message carries its sender's door-key fingerprint for its day,
@@ -860,7 +923,7 @@ export class DenClient {
       // What it was sent for: an earlier message of this room (the order an
       // agent acts on), as its sender says.
       const cause = typeof m.for === 'string' && /^[0-9a-f]{16}$/.test(m.for) && m.for !== m.id ? m.for : null;
-      shown = { id: m.id, t: m.t, from: m.from, key: m.key, text: typeof m.text === 'string' ? m.text.slice(0, 4000) : '', reply: typeof m.reply === 'string' ? m.reply : null, file, seq: m.seq || 0, at: m.at || Date.now(), ...(Number.isFinite(m.srv) ? { srv: m.srv } : {}), mine, reactions: {}, ...(task ? { task } : {}), ...(cause ? { for: cause } : {}) };
+      shown = { id: m.id, t: m.t, from: m.from, key: m.key, text: typeof m.text === 'string' ? m.text.slice(0, 4000) : '', reply: typeof m.reply === 'string' && MSG_ID.test(m.reply) ? m.reply : null, file, seq: m.seq || 0, at: m.at || Date.now(), ...(Number.isFinite(m.srv) ? { srv: m.srv } : {}), mine, reactions: {}, ...(task ? { task } : {}), ...(cause ? { for: cause } : {}) };
       log.push(shown);
     } else if (m.t === 'react') {
       const i = at(m.to);
@@ -909,7 +972,7 @@ export class DenClient {
       // is told who gave it.
       const r = this.rooms.get(room);
       const title = plainText(m.text).slice(0, 60);
-      if (!r || r.kind !== 'private' || !title || /^m-[0-9a-f]/i.test(title)) return;
+      if (!r || r.kind !== 'private' || !title || /^m-[0-9a-f]/i.test(title) || typeof m.id !== 'string' || !MSG_ID.test(m.id)) return;
       r.title = title;
       await this.keepPrivate();
       this.on('rooms', [...this.rooms.values()]);
@@ -1650,9 +1713,11 @@ export class DenClient {
   }
 
   /// On an agent: the rules in force ({ mode, takes_from, files, by, at }),
-  /// or none (every room, no one's tasks but the owner's, files).
+  /// or none (every room, no one's tasks but the owner's, files). Only rules
+  /// its owner (or a device linked to them) set count, checked as they are
+  /// read: an owner who lets the agent go, or a new owner, ends the old ones.
   rules() {
-    const all = Object.values(this.myRules || {});
+    const all = Object.values(this.myRules || {}).filter((r) => this.fromOwner(r.by));
     if (!all.length) return null;
     const last = all.reduce((a, b) => (b.at > a.at ? b : a));
     return { mode: last.mode, takes_from: last.takes_from, files: last.files, by: last.by, at: last.at };
@@ -1663,7 +1728,7 @@ export class DenClient {
   allowedHere(room) {
     const r = this.rules();
     if (!r || r.mode === 'all') return true;
-    return !!this.myRules[room]?.here;
+    return !!this.myRules[room]?.here && this.fromOwner(this.myRules[room].by);
   }
 
   /// No longer this member's agent: it carries no authority from here.
@@ -1682,6 +1747,9 @@ export class DenClient {
     if (!this.agent) throw new Error('Only an agent takes an owner.');
     this.agent.owner = key || null;
     this.agent.since = key ? Date.now() : null;
+    // The rules were the last owner's.
+    this.myRules = {};
+    await this.kv.put('myRules', this.myRules);
     if (key) { await this.kv.put('owner', key); await this.kv.put('ownerSince', this.agent.since); } else { await this.kv.del('owner'); await this.kv.del('ownerSince'); }
     this.on('nicks', { key: this.me.key });
     for (const room of this.den.rooms()) await this.send(room, this.profile()).catch(() => {});
@@ -1781,7 +1849,7 @@ const supportsScript = typeof RTCRtpScriptTransform !== 'undefined';
 const supportsStreams = typeof RTCRtpSender !== 'undefined' && 'createEncodedStreams' in RTCRtpSender.prototype;
 const VOICE_BITRATE = 64_000;
 
-class Voice {
+export class Voice {
   constructor(client, room, onSlots) {
     Object.assign(this, { client, room, onSlots: onSlots || (() => {}), keys: new Map(), screenKeys: new Map(), people: [], roster: [], sealed: 0, opened: 0, failed: 0, waiting: new Map(), asked: 0, screen: null, presenting: false, stage: null, stoppedBy: null });
   }
@@ -1811,7 +1879,8 @@ class Voice {
     // After a change, keep sealing under the epoch before for a moment:
     // members who apply the change a little later can still open every frame
     // (the old keys are kept 5 s for that), and nobody's stage freezes.
-    if (this.current !== undefined && this.current !== index && this.keys.has(this.current)) {
+    const changed = this.current !== undefined && this.current !== index;
+    if (changed && this.keys.has(this.current)) {
       this.sealIndex = this.current;
       clearTimeout(this.sealNew);
       this.sealNew = setTimeout(() => { this.sealIndex = this.current; this.postKeys(); }, 2000);
@@ -1820,11 +1889,16 @@ class Voice {
     }
     this.current = index;
     this.postKeys();
-    clearTimeout(this.dropOld);
-    this.dropOld = setTimeout(() => {
-      for (const m of [this.keys, this.screenKeys]) for (const i of [...m.keys()]) if (i !== this.current) m.delete(i);
-      this.postKeys();
-    }, 5000);
+    // The epoch before goes 5 s after the change, and only the change starts
+    // that clock: refreshes in between (roster, slots, a presenter) must not
+    // keep a removed member's keys alive.
+    if (changed) {
+      clearTimeout(this.dropOld);
+      this.dropOld = setTimeout(() => {
+        for (const m of [this.keys, this.screenKeys]) for (const i of [...m.keys()]) if (i !== this.current) m.delete(i);
+        this.postKeys();
+      }, 5000);
+    }
   }
 
   postKeys() {

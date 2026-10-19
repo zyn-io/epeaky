@@ -34,8 +34,10 @@ you trust it with anything that matters.
   connection.
 - **Screen sharing**: one person in a voice room at a time shares a screen,
   window or tab (from a desktop browser), and everyone else in the voice
-  room watches. Each frame is encrypted in the browser like voice. A
-  moderator who may kick can stop a share.
+  room watches. Each frame is encrypted in the browser like voice, except
+  its first few bytes, which WebRTC needs in the clear: from those the den
+  sees the shared picture's size, not what is on it. A moderator who may
+  kick can stop a share.
 - **Entry** is a blind token (RFC 9474): the door checks a pass and signs a
   token it never sees; the den admits the device that token names.
 - **Moderation**, the way Discord does it: an owner with every power, roles
@@ -167,7 +169,11 @@ included: `docker build -t epeaky .` (the image `ghcr.io/zyn-io/epeaky` is
 built the same way). `server/Dockerfile` builds only the server, around a page
 already built into `server/priv/page`. Run it bound to loopback behind a TLS
 proxy that sends `X-Forwarded-Proto: https`; the den forces https and
-redirects every request that arrives without it.
+redirects every request that arrives without it. The proxy must run on the
+same machine: the den takes the client's address from `X-Forwarded-For` only
+from a proxy on loopback. Behind a proxy elsewhere every client has the
+proxy's address, so the per-address limits (the door, joining, connecting)
+count the whole den as one client.
 
 | Variable | |
 |---|---|
@@ -213,6 +219,8 @@ optional. They are per device per day unless noted:
 | `inbox` | 100 | invitations waiting for one device at once |
 | `history_bytes` | 4 MB | ciphertext in one history reply |
 | `min_free_bytes` | 2 GB | free disk below which nothing more is taken |
+| `sockets` | 10 | connections one device holds open at once |
+| `connects_per_minute` | 300 | connections opened from one address a minute (a crowd behind one address may need more) |
 
 Ciphertext and files are kept `retention_days` (30) days.
 

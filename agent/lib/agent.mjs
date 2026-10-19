@@ -25,6 +25,10 @@ export function parseInvite(link) {
   return { base: u.origin, code };
 }
 
+// What the agent can start again if its file is damaged: where next stopped,
+// the changes it numbered, its journal.
+const REMAKE = ['handed', 'handedBy', 'handedChange', 'changes', 'journal'];
+
 export class Agent {
   constructor(dir, log = () => {}) {
     this.dir = dir;
@@ -42,7 +46,7 @@ export class Agent {
   async open(base) {
     const { DenClient } = await client();
     const wasm = await readFile(new URL('den/den_mls_bg.wasm', RUNTIME));
-    this.den = new DenClient({ base, keysUrl: `${base}/door/keys`, kv: fileStore(join(this.dir, 'state')), wasm, on: (ev, d) => this.event(ev, d) });
+    this.den = new DenClient({ base, keysUrl: `${base}/door/keys`, kv: fileStore(join(this.dir, 'state'), { remake: REMAKE }), wasm, on: (ev, d) => this.event(ev, d) });
     this.me = await this.den.start();
     this.trusted = new Set((await this.den.kv.get('agent:trusted')) || []);
     return this.me;
@@ -143,7 +147,8 @@ export class Agent {
     // A task's state, for next --tasks: on a task this agent gave (its
     // worker's word), or its own task being canceled by whoever gave it.
     const t = d?.message?.task;
-    if (ev === 'message' && t && !d.mine && this.visible(d.room) && ((d.kind === 'task-state' && (d.message.key === this.me.key || (t.to === this.me.key && t.state === 'canceled'))) || (d.kind === 'del' && t.to === this.me.key))) {
+    // (A deleted task is the deletion above, which --tasks also takes.)
+    if (ev === 'message' && t && !d.mine && this.visible(d.room) && d.kind === 'task-state' && (d.message.key === this.me.key || (t.to === this.me.key && t.state === 'canceled'))) {
       this.changing = (this.changing || Promise.resolve()).then(() => this.noteChange(d.room, d.message, 'state')).catch((e) => this.log(`change: ${e.message}`));
     }
     for (const f of this.listeners) f.event?.(ev, d);
@@ -212,12 +217,16 @@ export class Agent {
     if (m.t === 'note') r.text = m.text || '';
     if (!r.mention && kind !== 'self' && names(m.text, { name: this.me.name, nick: this.me.nick })) r.mention = true;
     if (r.task) r.task.to_nick = this.den.nickFor(r.task.to) || '';
+    // The owner's task for someone else is no order to this agent.
+    if (r.task && r.task.to !== this.me.key && r.authority === 'owner') r.authority = 'none';
     const rules = this.den.rules();
     // Delegated: a task for this agent from an agent its owner named, given
-    // after the owner did. Never ordinary words: those stay information.
-    if (rules && r.task?.to === this.me.key && kind === 'agent' && rules.takes_from.includes(key) && (m.at || 0) >= rules.at - 60_000) {
+    // after the owner did, while that agent still has the same owner as this
+    // one. Never ordinary words: those stay information.
+    const owner = this.den.agentOwner(this.me.key);
+    if (rules && owner && r.task?.to === this.me.key && kind === 'agent' && rules.takes_from.includes(key) && this.den.agentOwner(key) === owner && (m.at || 0) >= rules.at - 60_000) {
       r.authority = 'delegated';
-      r.on_behalf_of = this.den.agent?.owner || null;
+      r.on_behalf_of = owner;
     }
     if (rules && rules.files === false && m.file) {
       r.text = "(a file: your owner's rules keep files from this agent)";
@@ -298,13 +307,19 @@ export class Agent {
     return j.list.slice(-Math.max(1, Math.min(5000, limit)));
   }
 
-  /// Orders as they are handed (by next or watch): each once in the journal,
-  /// and the last in each room kept for causeOf's guess.
-  async handedOrders(records) {
+  /// The ids of the orders handed so far, from the journal.
+  async handedSet() {
     if (!this.handedIds) {
       const j = (await this.den.kv.get('journal')) || { list: [] };
       this.handedIds = new Set(j.list.filter((e) => e.act === 'handed').map((e) => e.id));
     }
+    return this.handedIds;
+  }
+
+  /// Orders as they are handed (by next or watch): each once in the journal,
+  /// and the last in each room kept for causeOf's guess.
+  async handedOrders(records) {
+    await this.handedSet();
     const fresh = records.filter((r) => !r.change && (r.authority === 'owner' || r.authority === 'delegated') && !this.handedIds.has(r.id));
     for (const r of fresh) {
       this.handedIds.add(r.id);
@@ -403,7 +418,7 @@ export class Agent {
     const j = (await this.den.kv.get('changes')) || { n: 0, list: [] };
     j.n += 1;
     // As it stood then: an edit's words, a task's state.
-    const then = kind === 'edit' ? { text: m.text } : kind === 'state' ? { task: { ...m.task } } : {};
+    const then = kind === 'edit' ? { text: m.text } : (kind === 'state' || (kind === 'del' && m.task)) ? { task: { ...m.task } } : {};
     j.list = [...j.list, { n: j.n, room, id: m.id, kind, ct: Date.now(), ...then }].slice(-2000);
     await this.den.kv.put('changes', j);
     const r = await this.changeRecord(j.list.at(-1));
@@ -428,7 +443,7 @@ export class Agent {
     // as a task for this agent.
     const fits = (r) => {
       if (only && r.room !== only) return false;
-      if (r.change) return r.change === 'state' ? tasks : changes;
+      if (r.change) return r.change === 'state' ? tasks : changes || (tasks && r.change === 'deleted' && r.task?.to === this.me.key);
       if (r.kind === 'self' || r.kind === 'den') return false;
       return (!tasks || r.task?.to === this.me.key) && (!orders || r.authority === 'owner' || r.authority === 'delegated') && (!mentions || r.mention);
     };
@@ -437,43 +452,84 @@ export class Agent {
     const f = (r) => { if (fits(r)) { came.push(r); woke?.(); } };
     this.listeners.add(f);
     try {
-      this.handed ??= (await this.den.kv.get('handed')) || {};
-      let out = [];
+      // A cursor for each filter, so one filter's handing never hides from
+      // another what it has not handed. A filter seen for the first time
+      // starts from the cursor of before (one for all), so nothing old
+      // comes again.
+      const fk = `${orders ? 'o' : ''}${mentions ? 'm' : ''}${tasks ? 't' : ''}${changes ? 'c' : ''}` || '-';
+      this.handedBy ??= (await this.den.kv.get('handedBy')) || {};
+      if (!this.handedBy[fk]) {
+        this.handedBy[fk] = { rooms: { ...((await this.den.kv.get('handed')) || {}) }, change: (await this.den.kv.get('handedChange')) || 0 };
+      }
+      const cur = this.handedBy[fk];
+      // Each room's fitting messages in the room's own order (the den's seq),
+      // and the changes in theirs: queues whose heads are merged by time, so
+      // what is handed is always a prefix of each queue and its cursor can
+      // move to the last one handed without passing over another.
+      // An order already handed (by watch) is not handed again; a message
+      // still to come here carries its own edits and deletion.
+      const handed = await this.handedSet();
+      const ahead = new Set();
+      const queues = [];
       for (const r of this.den.rooms.values()) {
         if (!this.visible(r.id) || (only && r.id !== only)) continue;
         const log = await this.den.log(r.id);
-        const from = this.handed[r.id] ?? 0;
+        const from = cur.rooms[r.id] ?? 0;
+        const q = [];
         for (const m of log) {
           if ((m.seq || 0) > from && !m.mine && (m.t === 'msg' || m.t === 'file')) {
             const rec = this.recordOf(r.id, m, null, log);
-            if (fits(rec)) out.push(rec);
+            if (!fits(rec) || ((rec.authority === 'owner' || rec.authority === 'delegated') && handed.has(rec.id))) continue;
+            ahead.add(rec.id);
+            q.push(rec);
           }
         }
+        q.sort((a, b) => a.seq - b.seq);
+        if (q.length) queues.push(q);
       }
+      // The changes after the cursor: those to hand, and those it may pass
+      // over (not for this filter, or carried by a message still to come).
+      const pending = [];
       if (changes || tasks) {
-        this.handedChange ??= (await this.den.kv.get('handedChange')) || 0;
         const j = (await this.den.kv.get('changes')) || { n: 0, list: [] };
+        const q = [];
         for (const c of j.list) {
-          if (c.n <= this.handedChange || (only && c.room !== only) || !this.visible(c.room)) continue;
-          const rec = await this.changeRecord(c);
-          if (rec && fits(rec)) out.push(rec);
+          if (c.n <= cur.change) continue;
+          const rec = (only && c.room !== only) || !this.visible(c.room) ? null : await this.changeRecord(c);
+          const take = !!rec && fits(rec) && !(c.kind !== 'state' && ahead.has(c.id));
+          pending.push({ n: c.n, take });
+          if (take) q.push(rec);
         }
+        q.sort((a, b) => a.change_n - b.change_n);
+        if (q.length) queues.push(q);
+      }
+      const max = Math.max(1, Math.min(1000, limit));
+      const when = (r) => r.changed_at || r.at || '';
+      let out = [];
+      while (out.length < max && queues.some((q) => q.length)) {
+        let best = null;
+        for (const q of queues) if (q.length && (!best || when(q[0]) < when(best[0]))) best = q;
+        out.push(best.shift());
       }
       if (!out.length && wait > 0) {
         if (!came.length) await new Promise((resolve) => { woke = resolve; setTimeout(resolve, wait * 1000); });
         out = came.slice(0, 1);
       }
-      // In the order things happened: a message when it was sent, a change when it was made.
-      const when = (r) => r.changed_at || r.at;
-      out.sort((a, b) => (when(a) < when(b) ? -1 : when(a) > when(b) ? 1 : 0));
-      out = out.slice(0, Math.max(1, Math.min(1000, limit)));
+      const was = JSON.stringify(cur);
+      const gave = new Set();
       for (const r of out) {
-        if (r.change) this.handedChange = Math.max(this.handedChange || 0, r.change_n);
-        else this.handed[r.room] = Math.max(this.handed[r.room] ?? 0, r.seq);
+        if (r.change) gave.add(r.change_n);
+        else cur.rooms[r.room] = Math.max(cur.rooms[r.room] ?? 0, r.seq);
       }
-      if (out.some((r) => !r.change)) await this.den.kv.put('handed', this.handed);
+      // The change cursor moves over what was handed and what it may pass,
+      // up to the first change still to hand.
+      for (const c of pending) {
+        if (c.take && !gave.has(c.n)) break;
+        cur.change = c.n;
+      }
+      for (const n of gave) cur.change = Math.max(cur.change || 0, n);
+      if (JSON.stringify(cur) !== was) await this.den.kv.put('handedBy', this.handedBy);
       await this.handedOrders(out);
-      if (out.some((r) => r.change)) await this.den.kv.put('handedChange', this.handedChange);
       return out;
     } finally {
       this.listeners.delete(f);

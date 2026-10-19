@@ -71,6 +71,26 @@ defmodule DenWeb.LimitsTest do
     assert_reply ref, :error, %{reason: "quota"}
   end
 
+  test "invitations come only from a private room, and each recipient counts against the day's cap" do
+    sender = String.duplicate("e5", 32)
+    victims = for i <- 0..2, do: String.duplicate("e#{6 + i}", 32)
+    for v <- victims, do: Den.Rooms.admit(v, DateTime.add(DateTime.utc_now(), 3600, :second) |> DateTime.truncate(:second))
+    # From an open room (anyone may join one): refused.
+    {:ok, _, open} = subscribe_and_join(device(sender), DenWeb.RoomChannel, "room:general")
+    ref = push(open, "invite", %{"to" => victims, "welcome" => Base.encode64("w")})
+    assert_reply ref, :error, %{reason: "invitations come from private rooms"}
+    assert Enum.all?(victims, &(Den.Inbox.waiting(&1) == []))
+    # From a private room: three recipients use three of the day's three.
+    room = "p-" <> String.duplicate("6f", 16)
+    {:ok, _} = Den.Rooms.private_room(room, sender)
+    {:ok, _, r} = subscribe_and_join(device(sender), DenWeb.RoomChannel, "room:" <> room)
+    Application.put_env(:den, :limits, %{invites: 3})
+    ref = push(r, "invite", %{"to" => victims, "welcome" => Base.encode64("w")})
+    assert_reply ref, :ok
+    ref = push(r, "invite", %{"to" => [hd(victims)], "welcome" => Base.encode64("w")})
+    assert_reply ref, :error, %{reason: "quota"}
+  end
+
   test "a Welcome goes only to devices the den knows, and every copy counts against the sender's bytes" do
     room = "p-" <> String.duplicate("5e", 16)
     sender = String.duplicate("e3", 32)
@@ -90,6 +110,22 @@ defmodule DenWeb.LimitsTest do
     ref = push(r, "invite", %{"to" => [known], "welcome" => big})
     # 12 KB a copy, the same device once: the third copy is past 25 KB.
     assert_reply ref, :error, %{reason: "quota"}
+  end
+
+  test "a device holds at most :sockets connections, and an address opens at most :connects_per_minute" do
+    %{"a" => ka, "b" => kb} = keys()
+    Den.Rooms.admit(ka, DateTime.add(DateTime.utc_now(), 3600, :second) |> DateTime.truncate(:second))
+    Den.Rooms.admit(kb, DateTime.add(DateTime.utc_now(), 3600, :second) |> DateTime.truncate(:second))
+    s = fn key -> %{"session" => Phoenix.Token.sign(DenWeb.Endpoint, "den", %{key: key})} end
+    at = fn ip -> [connect_info: %{peer_data: %{address: ip, port: 1}, x_headers: []}] end
+    Application.put_env(:den, :limits, %{sockets: 2, connects_per_minute: 4})
+    assert {:ok, _} = connect(DenWeb.UserSocket, s.(ka), at.({198, 51, 100, 1}))
+    assert {:ok, _} = connect(DenWeb.UserSocket, s.(ka), at.({198, 51, 100, 1}))
+    assert :error = connect(DenWeb.UserSocket, s.(ka), at.({198, 51, 100, 1}))
+    assert {:ok, _} = connect(DenWeb.UserSocket, s.(kb), at.({198, 51, 100, 1}))
+    # Four from that address this minute: a fifth is refused, another address is not.
+    assert :error = connect(DenWeb.UserSocket, s.(kb), at.({198, 51, 100, 1}))
+    assert {:ok, _} = connect(DenWeb.UserSocket, s.(kb), at.({198, 51, 100, 2}))
   end
 
   test "below the free-disk floor, nothing is taken" do

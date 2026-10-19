@@ -63,10 +63,24 @@ defmodule DenWeb.RoomChannel do
     if socket.assigns.key in keys, do: {:noreply, socket}, else: {:stop, {:shutdown, :removed}, socket}
   end
 
+  # A timed-out device keeps its own state in step (commits, GroupInfo,
+  # reports) but starts nothing new: no room, group or invitation.
+  defp muted(socket) do
+    case Den.Mod.sanction(socket.assigns.key) do
+      %{until: until} -> {:error, %{reason: "You are timed out#{if until, do: " until #{Calendar.strftime(until, "%H:%M")} UTC", else: ""}.", code: "timeout", until: until && DateTime.to_unix(until)}}
+      _ -> nil
+    end
+  end
+
+  @starts ~w(create invite)
+
   # Every event, at a rate the den can answer (DenWeb.Throttle).
   @impl true
   def handle_in(event, payload, socket) do
+    refused = if event in @starts, do: muted(socket)
+
     cond do
+      refused -> {:reply, refused, socket}
       DenWeb.Throttle.allow?(event) -> handle(event, payload, socket)
       event == "typing" -> {:noreply, socket}
       true -> {:reply, DenWeb.Throttle.refused(), socket}
@@ -182,15 +196,19 @@ defmodule DenWeb.RoomChannel do
     end
   end
 
-  # After an Add the den ordered: the Welcome for the devices added.
+  # After an Add the den ordered: the Welcome for the devices added. Only in
+  # a private room (whose channel only its members can join): open rooms are
+  # joined by GroupInfo, and anyone can be in one.
   defp handle("invite", %{"to" => keys, "welcome" => b64}, socket) when is_list(keys) and length(keys) <= 50 and is_binary(b64) do
-    with {:ok, welcome} <- decode(b64),
+    with true <- String.starts_with?(socket.assigns.room, "p-") || {:error, :"invitations come from private rooms"},
+         {:ok, welcome} <- decode(b64),
          true <- Enum.all?(keys, &(is_binary(&1) and &1 =~ ~r/\A[0-9a-f]{64}\z/)) || {:error, :keys},
          true <- Den.Limits.disk_ok?() || {:error, :disk},
-         # Only devices the den has admitted get a Welcome; each copy is
-         # counted against the sender's daily bytes.
+         # Only devices the den has admitted get a Welcome; each recipient
+         # counts against the sender's invitations a day, and each copy
+         # against its daily bytes.
          to = Den.Inbox.known(keys),
-         :ok <- Rooms.quota(socket.assigns.key, "invite", Den.Limits.get(:invites)),
+         :ok <- Rooms.quota(socket.assigns.key, "invite", Den.Limits.get(:invites), max(length(to), 1)),
          :ok <- Rooms.quota(socket.assigns.key, "message_bytes", Den.Limits.get(:message_bytes), byte_size(welcome) * length(to)) do
       Den.Inbox.deliver(to, socket.assigns.room, welcome)
       {:reply, :ok, socket}

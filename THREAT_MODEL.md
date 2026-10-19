@@ -18,7 +18,11 @@ something is a limit rather than a guarantee, it says so.
   extensions for a den that matters.
 - **The issuer** (on the host's own site, `external` only): checks whatever
   the host requires and hands the page a pass code through a window the page
-  opens. Wallets and sign-ins run there, not beside the keys.
+  opens. Wallets and sign-ins run there, not beside the keys. That window
+  needs a way back to the page to hand it the code, so while it is open it
+  could also send the den's tab to another address (which would then not
+  have the keys, but could look like the den): it is the host's own site,
+  trusted as far as the host is.
 - **The door** (`/door/*`): checks a member pass and signs a blinded entry
   token (RFC 9474, RSABSSA-SHA384-PSS-Randomized).
 - **The den** (`/socket`, `/blob`): admits a device for the day its token
@@ -73,13 +77,17 @@ once in either case.
 
 ## Rooms
 
-- Messages, edits, reactions, replies and typing signals are MLS application
-  messages, readable only by the room's members. A message's author is the
+- Messages, edits, reactions and replies are MLS application messages,
+  readable only by the room's members. A message's author is the
   member whose leaf signed it, named from the tree at the message's own epoch:
   a late message from someone the room has since taken out is refused, and
   is never credited to whoever took that seat. A device's name is derived
   from its key (`m-` and 20 hex digits, 80 bits), never chosen; the members
   list warns when two names start alike.
+- Typing signals are not sealed: a device tells the den it is typing, and
+  the den tells the room which device. So the den sees when someone types
+  (as it sees when they write), and can show anyone as typing. They carry no
+  words.
 - A member may also give themselves a name. It travels sealed (the den never
   sees it) and is a claim: anyone can choose any name, so the page shows it
   beside the start of the device's own name, and warns when two members of a
@@ -194,7 +202,9 @@ One member of a voice room at a time may share their screen; the others
 watch it on a stage. The presenter's browser encrypts each VP8 frame with
 AES-GCM under the presenter's own screen key (the MLS exporter labelled
 `den screen` with their key, renewed every epoch, distinct from their voice
-key), with the same counter, replay window and one-minute rule as voice. The
+key), with the same counter and replay window as voice, and a 15-second rule
+(voice's is a minute): the den can replay at most the last few seconds of a
+share to someone who starts watching. The
 first bytes of each frame stay in the clear because WebRTC needs them: 10 on
 a keyframe, 3 otherwise. They are covered by the tag, so they cannot be
 changed. A viewer opens the stage only under the key of the member the den

@@ -1,12 +1,12 @@
 // The background process's plumbing, on every system (CI runs this on
 // Windows too): its socket or named pipe, its lock, its store.
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { alive, lock, proofFor, request, secretOf, socketPath } from '../lib/daemon.mjs';
+import { alive, lock, proofFor, request, secretOf, socketPath, talk } from '../lib/daemon.mjs';
 import { fileStore } from '../lib/store.mjs';
 
 test('Windows: a named pipe of this user and folder', () => {
@@ -58,7 +58,13 @@ test('a command trusts only the process that proves the agent\'s secret', async 
   await assert.rejects(request(path, 'read', {}, null, secret), (e) => e.code === 'impostor');
   await new Promise((r) => impostor.close(r));
   // The agent's own: it proves it holds the secret.
-  const real = createServer((s) => s.once('data', (d) => { const { nonce } = JSON.parse(String(d)); s.end(`${JSON.stringify({ ok: true, data: 'yes', proof: proofFor(secret, nonce) })}\n`); }));
+  const real = createServer((s) => {
+    s.once('data', (d) => {
+      const { nonce } = JSON.parse(String(d));
+      s.write(`${JSON.stringify({ ok: true, data: 'hello', proof: proofFor(secret, nonce) })}\n`);
+      s.once('data', () => s.end(`${JSON.stringify({ ok: true, data: 'yes' })}\n`));
+    });
+  });
   await new Promise((r) => real.listen(path, r));
   assert.equal(await request(path, 'read', {}, null, secret), 'yes');
   await new Promise((r) => real.close(r));
@@ -69,10 +75,78 @@ test('a command of another version stops at the process\'s handshake', async () 
   const dir = await mkdtemp(join(tmpdir(), 'eav-'));
   const secret = await secretOf(dir);
   const path = socketPath(dir);
-  const old = createServer((s) => s.once('data', (d) => { const { nonce } = JSON.parse(String(d)); s.end(`${JSON.stringify({ ok: true, data: [], proof: proofFor(secret, nonce), version: '0.2.0' })}\n`); }));
+  // An older process takes the command on the line it proves on.
+  const took = [];
+  const old = createServer((s) => s.once('data', (d) => { const { nonce, cmd } = JSON.parse(String(d)); took.push(cmd ?? null); s.end(`${JSON.stringify({ ok: true, data: [], proof: proofFor(secret, nonce), version: '0.2.0' })}\n`); }));
   await new Promise((r) => old.listen(path, r));
   await assert.rejects(request(path, 'next', {}, null, secret, '0.3.0'), (e) => e.code === 'version' && /0\.2\.0/.test(e.message));
-  assert.deepEqual(await request(path, 'down', {}, null, secret, '0.3.0'), []);
+  await request(path, 'down', {}, null, secret, '0.3.0');
+  // It heard no command but `down`, which carries nothing.
+  assert.deepEqual(took, [null, null, 'down']);
   await new Promise((r) => old.close(r));
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('the command goes only to a process that proved the secret first', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ean-'));
+  const secret = await secretOf(dir);
+  const path = socketPath(dir);
+  // Something else made the pipe first: it must never see the command or its words.
+  let heard = '';
+  const impostor = createServer((s) => s.on('data', (d) => { heard += d; s.write(`${JSON.stringify({ ok: true, data: 'hello' })}\n`); }));
+  await new Promise((r) => impostor.listen(path, r));
+  await assert.rejects(request(path, 'owner', { code: 'abcd-1234' }, null, secret), (e) => e.code === 'impostor');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.doesNotMatch(heard, /owner|abcd-1234/);
+  await new Promise((r) => impostor.close(r));
+  // The agent's own process: the proof, then the command.
+  const agent = { settled: async () => {}, status: () => ({ up: true }), listeners: new Set() };
+  const real = createServer((s) => talk(agent, s, () => {}, secret));
+  await new Promise((r) => real.listen(path, r));
+  assert.deepEqual(await request(path, 'status', {}, null, secret), { up: true });
+  await new Promise((r) => real.close(r));
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('the store: a value that cannot be read stops only what can be made again', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'eax-'));
+  const kv = fileStore(dir, { remake: ['handedBy'] });
+  await kv.put('handedBy', { t: 1 });
+  await kv.put('identity', { k: 1 });
+  await writeFile(join(dir, 'handedBy'), 'not a value');
+  await writeFile(join(dir, 'identity'), 'not a value');
+  // A cursor is started again (the bad file kept aside to look at)...
+  assert.equal(await kv.get('handedBy'), undefined);
+  assert.ok((await readdir(dir)).includes('handedBy.corrupt'));
+  await kv.put('handedBy', { t: 2 });
+  assert.deepEqual(await kv.get('handedBy'), { t: 2 });
+  // ...but a key or a group's state is never quietly forgotten.
+  await assert.rejects(kv.get('identity'), (e) => e.code === 'corrupt' && e.message.includes(join(dir, 'identity')));
+  await kv.wipe();
+});
+
+test('the store: half-written files of a process that is gone are cleared', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'eat-'));
+  const dead = 2 ** 22 + 12345;
+  await writeFile(join(dir, `k.${dead}.abcdef012345.tmp`), 'x');
+  await writeFile(join(dir, `k.${process.pid}.abcdef012345.tmp`), 'x');
+  const kv = fileStore(dir);
+  await kv.get('k');
+  const left = await readdir(dir);
+  assert.ok(!left.includes(`k.${dead}.abcdef012345.tmp`));
+  assert.ok(left.includes(`k.${process.pid}.abcdef012345.tmp`), 'not one a living process is writing');
+  await kv.wipe();
+});
+
+test('with no secret to check the proof by, no command is sent', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ean-'));
+  const path = socketPath(dir);
+  let heard = '';
+  const any = createServer((s) => s.on('data', (d) => { heard += d; s.write(`${JSON.stringify({ ok: true, data: 'hello' })}\n`); }));
+  await new Promise((r) => any.listen(path, r));
+  await assert.rejects(request(path, 'owner', { code: 'abcd-1234' }, null, null), (e) => e.code === 'impostor');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.doesNotMatch(heard, /abcd-1234/);
+  await new Promise((r) => any.close(r));
   await rm(dir, { recursive: true, force: true });
 });

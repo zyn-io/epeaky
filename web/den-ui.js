@@ -2,7 +2,7 @@
 // Everything here works on what den.js keeps on this device; nothing is
 // fetched in the clear but the den's ciphertext and the day keys.
 
-import { REACTIONS as EMOJI } from './den.js';
+import { REACTIONS as EMOJI, imageSize, inviteLink } from './den.js';
 import { mountAdmin, slowName } from './den-admin.js';
 const GROUP_MS = 5 * 60_000;
 // One line of text with nothing hidden in it: no bidirectional or zero-width
@@ -503,6 +503,10 @@ export function mountDen(den, el, me) {
     try {
       if (!urls.has(m.id)) {
         const blob = await den.openFile(m.file);
+        // Its size from its header first: a huge one is never decoded.
+        const size = imageSize(new Uint8Array(await blob.arrayBuffer()));
+        if (!size) return refuse(`${m.file.name}: this image could not be opened.`);
+        if (size.w * size.h > MAX_PIXELS) return refuse(`${m.file.name} is too large to show here.`);
         const bmp = await createImageBitmap(blob).catch(() => null);
         if (!bmp) return refuse(`${m.file.name}: this image could not be opened.`);
         const pixels = bmp.width * bmp.height;
@@ -1194,7 +1198,7 @@ export function mountDen(den, el, me) {
         if (!link) agentInvite = null;
       }
       if (!link && den.can('manage_invites')) {
-        try { link = (await den.modDo('invite_make', { n: 1, days: 1 })).links?.[0] || null; } catch { link = null; }
+        try { link = inviteLink((await den.modDo('invite_make', { n: 1, days: 1 })).links?.[0], location.origin); } catch { link = null; }
         if (link) agentInvite = { link, at: Date.now() };
       }
       el('ask').dataset.kind = 'own';
