@@ -1,6 +1,6 @@
 {
   "name": "epeaky-host-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "mcpName": "io.github.zyn-io/epeaky-host-mcp",
   "description": "Set up and run an Epeaky den on your own server, from an MCP client, over your own SSH",

@@ -9,12 +9,12 @@
     "subfolder": "agents/host-mcp"
   },
   "websiteUrl": "https://epeaky.zyn-network.com",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "epeaky-host-mcp",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "transport": {
         "type": "stdio"
       },
