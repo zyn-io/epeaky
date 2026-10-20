@@ -883,6 +883,28 @@ export class DenClient {
     return this.sync(room, await this.push(this.channels.get(room), 'state', {}));
   }
 
+  // ---- Screen shares ---------------------------------------------------------------
+
+  /// A member's signing key for their screen share, as they sent it sealed in
+  /// the room: `key` is MLS's own sender, so nobody can send one for another.
+  /// The newest a member sent stands, in the den's order (not by their clock).
+  learnShareKey(room, m) {
+    if (typeof m.pub !== 'string' || !/^[0-9a-f]{64}$/.test(m.pub)) return;
+    this.shareKeys ||= new Map();
+    const id = `${room}|${m.key}`;
+    const seq = Number.isFinite(m.seq) ? m.seq : 0;
+    if ((this.shareKeys.get(id)?.seq ?? -Infinity) > seq) return;
+    this.shareKeys.set(id, { pub: m.pub, seq });
+    // Also to voice still starting: a key sent while the microphone is asked for.
+    const v = [this.voice, this.joining].find((x) => x?.room === room);
+    v?.learnShareKey(m.key, m.pub).catch(() => {});
+  }
+
+  /// [member key, share key hex] for a room.
+  shareKeysOf(room) {
+    return [...(this.shareKeys || [])].filter(([id]) => id.startsWith(`${room}|`)).map(([id, v]) => [id.slice(room.length + 1), v.pub]);
+  }
+
   // ---- Messages --------------------------------------------------------------
 
   async log(room) {
@@ -905,6 +927,8 @@ export class DenClient {
     if (m.t === 'profile') return;
     if (m.t === 'pin' || m.t === 'pins' || m.t === 'unpin') { await this.applyPin(room, m, mine); return; }
     if (m.t === 'agent-rules') { if (!mine) await this.learnRules(room, m); return; }
+    if (m.t === 'screen-sig') { if (!mine) this.learnShareKey(room, m); return; }
+    if (m.t === 'screen-sig-ask') { if (!mine && m.of === this.me.key && this.voice?.room === room) this.voice.soonAnnounce(); return; }
     const log = await this.log(room);
     const at = (id) => log.findIndex((x) => x.id === id);
     let shown = null;
@@ -1817,7 +1841,8 @@ export class DenClient {
   async joinVoice(room, onSlots, { mode = 'auto' } = {}) {
     if (!this.inRoom(room)) throw new Error('Enter the room first.');
     const voice = new Voice(this, room, onSlots);
-    await voice.start(mode);
+    this.joining = voice;
+    try { await voice.start(mode); } finally { if (this.joining === voice) this.joining = null; }
     this.voice = voice;
     return voice;
   }
@@ -1851,7 +1876,7 @@ const VOICE_BITRATE = 64_000;
 
 export class Voice {
   constructor(client, room, onSlots) {
-    Object.assign(this, { client, room, onSlots: onSlots || (() => {}), keys: new Map(), screenKeys: new Map(), people: [], roster: [], sealed: 0, opened: 0, failed: 0, waiting: new Map(), asked: 0, screen: null, presenting: false, stage: null, stoppedBy: null });
+    Object.assign(this, { client, room, onSlots: onSlots || (() => {}), keys: new Map(), screenKeys: new Map(), sharePubs: new Map(), people: [], roster: [], sealed: 0, opened: 0, failed: 0, waiting: new Map(), asked: 0, screen: null, presenting: false, stage: null, stoppedBy: null });
   }
 
   /// Keys for us and everyone in the voice room (not only those in a slot
@@ -1957,6 +1982,8 @@ export class Voice {
       if (e.data.id) { this.waiting.get(e.data.id)?.(e.data.data); this.waiting.delete(e.data.id); }
     };
     await this.refreshKey();
+    // Share keys this device already has for the room (a share going on).
+    for (const [k, pub] of this.client.shareKeysOf(this.room)) await this.learnShareKey(k, pub);
     this.mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false })
       .catch((e) => { throw new Error(e?.name === 'NotAllowedError' ? 'The microphone is blocked for this page.' : 'No microphone found.'); });
     const ch = this.client.socket.channel(`voice:${this.room}`);
@@ -1965,7 +1992,10 @@ export class Voice {
     // Everyone in the voice room; the slots carry the eight heard most recently.
     ch.on('roster', ({ keys }) => {
       const members = new Set(this.client.members(this.room).map((m) => m.key));
+      const before = new Set(this.roster);
       this.roster = (Array.isArray(keys) ? keys : []).filter((k) => typeof k === 'string' && members.has(k) && k !== this.client.den.key()).slice(0, 100);
+      // Someone new in voice while we share: our share key again, for them.
+      if (this.presenting && this.roster.some((k) => !before.has(k))) this.soonAnnounce();
       this.refreshKey().catch(() => {});
       this.onSlots(this.people);
     });
@@ -1989,7 +2019,12 @@ export class Voice {
       // A new presenter: once their key is here, ask for a keyframe, so the
       // first picture is not one this device could not yet open.
       if (this.screen?.key !== was) {
-        this.refreshKey().then(() => { if (this.screen && this.screen.key !== this.client.den.key()) this.ch?.push('screen_key', {}); }).catch(() => {});
+        this.asks = 0;
+        this.refreshKey().then(() => {
+          if (!this.screen || this.screen.key === this.client.den.key()) return;
+          if (this.sharePubs.has(this.screen.key)) this.ch?.push('screen_key', {});
+          else this.askShare();
+        }).catch(() => {});
       }
       this.onSlots(this.people);
     });
@@ -2091,9 +2126,18 @@ export class Voice {
     const cap = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false });
     const track = cap.getVideoTracks()[0];
     try {
+      // This share's own signing key: every frame is signed with it, and its
+      // public half goes to the room sealed by MLS, before the den is asked
+      // for the stage. Another member can derive our screen key, not this one.
+      const share = await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify']).catch(() => null);
+      if (!share) throw new Error('This browser cannot sign a shared screen; try another browser.');
+      this.sharePub = hex(new Uint8Array(await crypto.subtle.exportKey('raw', share.publicKey)));
+      this.worker.postMessage({ signer: share.privateKey });
+      await this.announce();
       await this.client.push(this.ch, 'present', {});
     } catch (e) {
       cap.getTracks().forEach((t) => t.stop());
+      this.dropSigner();
       throw e.message === 'busy' ? new Error(`busy:${e.key}`) : e;
     }
     track.contentHint = 'detail';
@@ -2121,6 +2165,49 @@ export class Voice {
     this.capture = null;
     this.presenting = false;
     this.screenUp?.sender.replaceTrack(null).catch(() => {});
+    this.dropSigner();
+  }
+
+  /// The share's signing key goes with the share: a later one gets a new key.
+  dropSigner() {
+    this.sharePub = null;
+    clearTimeout(this.announceSoon);
+    this.worker?.postMessage({ signer: null });
+  }
+
+  /// Our share's public key, sealed to the room.
+  announce() {
+    this.announced = Date.now();
+    return this.client.send(this.room, { t: 'screen-sig', pub: this.sharePub });
+  }
+
+  /// Again, for someone new in voice or a viewer who asks: at most every 2 s.
+  soonAnnounce() {
+    if (!this.presenting || !this.sharePub) return;
+    clearTimeout(this.announceSoon);
+    const wait = Math.max(300, 2000 - (Date.now() - (this.announced || 0)));
+    this.announceSoon = setTimeout(() => { if (this.presenting && this.sharePub) this.announce().catch(() => {}); }, wait);
+  }
+
+  /// No share key for the presenter (this page was reloaded, or came after
+  /// they sent it): ask them for it, sealed to the room, every 3 s, 5 times.
+  askShare() {
+    const p = this.screen?.key;
+    clearTimeout(this.askAgain);
+    if (!p || p === this.client.den.key() || this.sharePubs.has(p) || this.asks >= 5) return;
+    this.asks = (this.asks || 0) + 1;
+    this.client.send(this.room, { t: 'screen-sig-ask', of: p }).catch(() => {});
+    this.askAgain = setTimeout(() => this.askShare(), 3000);
+  }
+
+  /// A member's share key, from their sealed message: the stage opens their
+  /// frames only signed with it. Once the presenter's is here, a keyframe.
+  async learnShareKey(key, pub) {
+    const k = await crypto.subtle.importKey('raw', unhex(pub), 'Ed25519', false, ['verify']).catch(() => null);
+    if (!k) return;
+    this.sharePubs.set(key, k);
+    this.worker?.postMessage({ sharePubs: [...this.sharePubs] });
+    if (this.screen?.key === key && key !== this.client.den.key()) this.ch?.push('screen_key', {});
   }
 
   /// A moderator's stop, for whoever presents.
@@ -2254,6 +2341,7 @@ export class Voice {
     this.endCapture();
     clearInterval(this.offMembers);
     clearTimeout(this.dropOld);
+    clearTimeout(this.askAgain);
     try { await this.client.push(this.ch, 'leave', {}); } catch { /* gone */ }
     this.ch.leave();
     this.pc?.close();

@@ -134,7 +134,7 @@ something:
 | `epeaky owner` | who owns the den |
 | `epeaky audit 30` | what moderators did |
 | `epeaky logs 100` | the den's last log lines |
-| `epeaky update` | pull the latest version and restart |
+| `epeaky update` | the newest release: its image by digest, the Caddyfile and this command |
 
 **Settings** live in `/opt/epeaky/.env`, one `NAME=value` a line. The file
 holds the den's secret, so it and its backups stay readable by root only.

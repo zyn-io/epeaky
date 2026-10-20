@@ -1,6 +1,7 @@
 name: agent-release
 # epeaky-agent to npm, from a tag agent-vX.Y.Z (the version in agent/package.json);
-# epeaky-mcp from mcp-vX.Y.Z and epeaky-librarian from librarian-vX.Y.Z (agents/):
+# epeaky-mcp from mcp-vX.Y.Z, epeaky-librarian from librarian-vX.Y.Z and
+# epeaky-host-mcp from host-mcp-vX.Y.Z (agents/):
 # built here from this commit (the den's client, the MLS wasm), tested, then
 # published with provenance, so npm shows which commit and workflow made it.
 # Publishing uses npm's trusted publishing (no token) once the package's
@@ -9,7 +10,7 @@ name: agent-release
 # pinned to exact versions: this job can publish.
 on:
   push:
-    tags: ['agent-v*', 'mcp-v*', 'librarian-v*']
+    tags: ['agent-v*', 'mcp-v*', 'librarian-v*', 'host-mcp-v*']
 permissions:
   contents: read
   id-token: write
@@ -48,7 +49,7 @@ jobs:
 
   # The agents built on epeaky-agent: no build, their tests, then npm.
   publish-agents:
-    if: startsWith(github.ref_name, 'mcp-v') || startsWith(github.ref_name, 'librarian-v')
+    if: startsWith(github.ref_name, 'mcp-v') || startsWith(github.ref_name, 'librarian-v') || startsWith(github.ref_name, 'host-mcp-v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -59,12 +60,43 @@ jobs:
       - name: Which package, and the tag is its version
         id: pkg
         run: |
-          case "$GITHUB_REF_NAME" in mcp-v*) dir=agents/mcp ;; librarian-v*) dir=agents/librarian ;; esac
+          case "$GITHUB_REF_NAME" in mcp-v*) dir=agents/mcp ;; librarian-v*) dir=agents/librarian ;; host-mcp-v*) dir=agents/host-mcp ;; esac
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          if [ -f "$dir/server.json" ]; then echo "registry=1" >> "$GITHUB_OUTPUT"; fi
           test "${GITHUB_REF_NAME%%-v*}-v$(node -p "require('./$dir/package.json').version")" = "$GITHUB_REF_NAME"
-      - run: npm install --no-save epeaky-agent@"$(node -p "require('./package.json').dependencies['epeaky-agent']")" && node --test tests/*.test.mjs
+      # host-mcp stands alone; the others are tested on the epeaky-agent they name.
+      - run: |
+          a=$(node -p "require('./package.json').dependencies?.['epeaky-agent'] ?? ''")
+          if [ -n "$a" ]; then npm install --no-save epeaky-agent@"$a"; fi
+          node --test tests/*.test.mjs
         working-directory: ${{ steps.pkg.outputs.dir }}
-      - run: npm install -g npm@12.2.0 && npm publish --provenance --access public
+      # An MCP server also goes to the official MCP Registry (server.json), signed
+      # in as this repository through GitHub's OIDC: no one's token. Checked
+      # before npm, so a server.json that would be refused stops the release.
+      - name: The MCP Registry's publisher, pinned, and server.json checked
+        if: steps.pkg.outputs.registry == '1'
+        working-directory: ${{ steps.pkg.outputs.dir }}
+        run: |
+          curl -fsSL -o /tmp/mcp-publisher.tgz https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
+          echo "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc  /tmp/mcp-publisher.tgz" | sha256sum -c -
+          tar xzf /tmp/mcp-publisher.tgz -C /tmp mcp-publisher
+          v=$(node -p 'require("./package.json").version')
+          test "$(node -p 'const s=require("./server.json"); s.version + " " + s.packages[0].version')" = "$v $v"
+          /tmp/mcp-publisher validate
+      # Already on npm (a re-run after the registry step failed): not again.
+      - run: |
+          if npm view "$(node -p 'require("./package.json").name')@$(node -p 'require("./package.json").version')" version >/dev/null 2>&1; then echo "on npm already"; exit 0; fi
+          npm install -g npm@12.2.0 && npm publish --provenance --access public
         working-directory: ${{ steps.pkg.outputs.dir }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: To the MCP Registry, once npm serves the version
+        if: steps.pkg.outputs.registry == '1'
+        working-directory: ${{ steps.pkg.outputs.dir }}
+        run: |
+          v=$(node -p 'require("./package.json").version')
+          n=$(node -p 'require("./package.json").name')
+          for i in $(seq 1 30); do npm view "$n@$v" version >/dev/null 2>&1 && break; sleep 10; done
+          npm view "$n@$v" version >/dev/null || { echo "npm does not serve $n@$v yet: run this job again" >&2; exit 1; }
+          /tmp/mcp-publisher login github-oidc
+          /tmp/mcp-publisher publish

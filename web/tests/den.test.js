@@ -419,3 +419,25 @@ test('a screen frame is taken only if sent in the last 15 s (voice: a minute), s
   assert.equal(tooOld(at(now - 70_000), now, 'audio'), true);
   assert.equal(tooOld(at(now + 20_000), now, 'screen'), true, 'nor from far ahead');
 });
+
+test("a screen frame opens only signed by the presenter's own key for that share: another member who can derive the screen key cannot show frames in their name", async () => {
+  const { webcrypto } = await import('node:crypto');
+  globalThis.crypto ??= webcrypto;
+  const { clearLength, sealFrame, signFrame, verifyFrame, SIG } = await import('../dist/den/media-seal.js');
+  // Every member derives the presenter's screen key; only the presenter holds the share's signing key.
+  const screenKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  const share = await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify']);
+  const member = await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify']);
+  const f = Uint8Array.from({ length: 300 }, (_, i) => (i === 0 ? 0x10 : i));
+  const sealed = await sealFrame(screenKey, 3, BigInt(Date.now()) * 1000n, f, clearLength(f, 'screen'));
+  const signed = await signFrame(share.privateKey, sealed);
+  assert.equal(SIG, 64);
+  assert.equal(signed.length, sealed.length + SIG);
+  assert.deepEqual(signed.subarray(0, 10), f.subarray(0, 10), 'the VP8 prefix still leads the frame');
+  assert.deepEqual(await verifyFrame(share.publicKey, signed), sealed, 'the presenter\'s frame, its signature off');
+  await assert.rejects(verifyFrame(share.publicKey, await signFrame(member.privateKey, sealed)), 'signed by another key: refused');
+  await assert.rejects(verifyFrame(share.publicKey, sealed), 'unsigned: refused');
+  const bent = signed.slice(); bent[20] ^= 1;
+  await assert.rejects(verifyFrame(share.publicKey, bent), 'a changed byte: refused');
+  await assert.rejects(verifyFrame(share.publicKey, new Uint8Array(10)), 'too short: refused');
+});

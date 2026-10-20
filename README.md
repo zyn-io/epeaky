@@ -69,13 +69,16 @@ On a Linux server (x86-64 or arm64) with a domain pointing at it, TCP 80 and 443
 and UDP 50000–50199 open for voice:
 
 ```sh
-curl -fsSL https://epeaky.zyn-network.com/install.sh | sudo bash
+curl --proto '=https' --tlsv1.2 -fsSL https://epeaky.zyn-network.com/install.sh | sudo bash
 # or: sudo bash install.sh --domain chat.example.org [--email you@example.org] [--yes]
 ```
 
 It installs Docker if it is missing (after asking), puts the den and Caddy
 (TLS from Let's Encrypt) in `/opt/epeaky`, starts them, and prints your first
-invite link: open it on the device you will use. Then, on the server:
+invite link: open it on the device you will use. The installer the site serves
+is the newest [release](https://github.com/zyn-io/epeaky/releases)'s: it names
+the den's image by digest (and Caddy's), and the release lists its SHA-256 next
+to it. Then, on the server:
 
 ```sh
 epeaky invite 5 7      # 5 one-use invite links, good for 7 days
@@ -84,7 +87,7 @@ epeaky approve <id>    # or: epeaky decline <id>
 epeaky members         # how many, by the way they joined
 epeaky owner m-1a2b3c  # make your device the den's owner (its name in the page)
 epeaky audit           # what moderators did
-epeaky update          # the latest image
+epeaky update          # the newest release
 ```
 
 Once your device owns the den, everything else is in its page: the gear
@@ -130,8 +133,10 @@ tar -czf /root/den-keys-$(date +%F).tgz keys cookie       # keep private: they l
 Keep backups no longer than the den keeps ciphertext (30 days by default).
 Restoring an older database puts every room behind its members' devices:
 they join open rooms again by themselves, and private rooms need their
-members invited again. `epeaky update` pulls the latest image and restarts
-it; the database is migrated on start.
+members invited again. `epeaky update` runs the newest release's installer
+again (the image by digest, the Caddyfile, the `epeaky` command; `.env` and
+the data stay); the database is migrated on start. To check a release's
+image: `gh attestation verify oci://ghcr.io/zyn-io/epeaky@sha256:… -R zyn-io/epeaky`.
 
 ## Layout
 

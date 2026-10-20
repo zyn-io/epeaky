@@ -208,9 +208,16 @@ share to someone who starts watching. The
 first bytes of each frame stay in the clear because WebRTC needs them: 10 on
 a keyframe, 3 otherwise. They are covered by the tag, so they cannot be
 changed. A viewer opens the stage only under the key of the member the den
-says presents, and only for a member of the room as its own group has it. As
-with voice, any member can derive a presenter's screen key, so a member
-working with the den could show frames as someone else's screen.
+says presents, and only for a member of the room as its own group has it.
+Any member can derive a presenter's screen key, so each frame is also signed,
+after sealing, with an Ed25519 key the presenter's browser makes for that
+share; its public half goes to the room sealed by MLS, under the presenter's
+own key, before the share starts (and again for anyone who joins the voice
+room during it). A viewer opens a frame only signed with the share key of the
+member the den names, so no other member, with or without the den, can show
+frames as someone else's screen. Each share has a new key; it lives only in
+the presenter's page while they share. (Voice frames are not signed, as said
+above: a signature on every 20 ms frame would add about 40% to voice.)
 
 The den sees who presents, when and for how long; how much video they send
 and when keyframes come; and, from the bytes left in the clear, the size of
@@ -336,6 +343,18 @@ Ciphertext and blobs are kept 30 days, then deleted (SQLite overwrites what
 it deletes). A device whose day ended without a new token is removed from its
 rooms by the members' own devices. Backups, if the host keeps any, should
 follow the same 30 days.
+
+## The release
+
+A den runs the image its installer names, and that image also serves the page
+that holds every member's keys. A release's installer (the one the site serves,
+and the one `epeaky update` runs) names the image by digest, and Caddy's: a
+moved tag or a pushed `latest` does not reach a den that runs it. Each
+release's image carries a build-provenance attestation from this repository's
+workflow (`gh attestation verify oci://ghcr.io/zyn-io/epeaky@sha256:… -R
+zyn-io/epeaky` names the commit), and the release lists the installer's
+SHA-256. What this rests on is the repository: whoever can push a tag here, or
+change a release, changes what new installs and updates run.
 
 ## Not covered
 

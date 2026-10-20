@@ -48,6 +48,29 @@ export async function openFrame(key, d, clear) {
 /// The key index of a sealed frame, read before choosing the key.
 export const indexOf = (d) => d[d.length - 1];
 
+/// A screen frame, once sealed, is signed with the presenter's own Ed25519 key
+/// for that share (made when the share starts, its public half sent sealed in
+/// the room): every member can derive the presenter's screen key, but only the
+/// presenter holds this one, so no other member can show frames in their name.
+/// Frame: [sealed frame][signature 64].
+export const SIG = 64;
+
+export async function signFrame(key, sealed) {
+  const sig = new Uint8Array(await crypto.subtle.sign('Ed25519', key, sealed));
+  const out = new Uint8Array(sealed.length + SIG);
+  out.set(sealed);
+  out.set(sig, sealed.length);
+  return out;
+}
+
+/// The sealed frame without its signature, if the signature is the share key's.
+export async function verifyFrame(key, d) {
+  if (d.length < SIG + TAG + TAIL) throw new Error('short');
+  const sealed = d.subarray(0, d.length - SIG);
+  if (!(await crypto.subtle.verify('Ed25519', key, d.subarray(d.length - SIG), sealed))) throw new Error('unsigned');
+  return sealed;
+}
+
 function join(a, b) {
   const out = new Uint8Array(a.length + b.length);
   out.set(a);

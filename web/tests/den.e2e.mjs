@@ -349,6 +349,9 @@ const colour = () => B.p.evaluate(() => {
 const seen = new Set();
 for (let i = 0; i < 40 && seen.size < 3; i++) { seen.add(await colour()); await B.p.waitForTimeout(150); }
 ok(['red', 'green', 'blue'].every((c) => seen.has(c)), `B's picture follows A's screen (${[...seen]})`);
+// The worker posts its counts every 2 s.
+await until(A.p, () => window.__den.voice.sealedScreen > 5, null, 10000);
+await until(B.p, () => window.__den.voice.openedScreen > 5, null, 10000);
 const vs = await B.p.evaluate(() => ({ failed: window.__den.voice.failed, presenter: window.__den.voice.screen?.key, screenOpened: window.__den.voice.openedScreen, screenFailed: window.__den.voice.failedScreen }));
 const as = await A.p.evaluate(() => ({ screenSealed: window.__den.voice.sealedScreen }));
 // Chrome can hand the receiver its first keyframe twice; the second copy is
@@ -370,6 +373,28 @@ await B.p.evaluate(([k]) => window.__den.voice.ch.trigger('screen', { key: k }),
 ok(misnamed.failed > 5 && misnamed.opened === 0, `screen frames under another presenter's name do not open (${JSON.stringify(misnamed)})`);
 const reopened = await B.p.evaluate(() => window.__den.voice.openedScreen);
 ok(await until(B.p, ([n]) => window.__den.voice.openedScreen > n, [reopened + 10], 10000), 'named rightly again, they open');
+// Every member derives A's screen key; A's frames open only signed with the
+// key A made for this share and sent sealed to the room. B, holding another
+// key for A, opens none of them.
+const aShare = await A.p.evaluate(() => window.__den.voice.sharePub);
+const bHas = await B.p.evaluate(([a]) => Object.fromEntries(window.__den.shareKeysOf(window.__den.voice.room))[a], [A.me.key]);
+ok(/^[0-9a-f]{64}$/.test(aShare || '') && bHas === aShare, `B has A's share key from A's own sealed message (${(aShare || '').slice(0, 12)}…)`);
+const resigned = await B.p.evaluate(async ([a]) => {
+  const v = window.__den.voice;
+  const other = await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify']);
+  v.worker.postMessage({ sharePubs: [...v.sharePubs, [a, other.publicKey]] });
+  await new Promise((r) => setTimeout(r, 3000));
+  const f0 = v.failedScreen;
+  const o0 = v.openedScreen;
+  await new Promise((r) => setTimeout(r, 3000));
+  const out = { failed: v.failedScreen - f0, opened: v.openedScreen - o0 };
+  v.worker.postMessage({ sharePubs: [...v.sharePubs] });
+  v.ch.push('screen_key', {});
+  return out;
+}, [A.me.key]);
+ok(resigned.failed > 5 && resigned.opened === 0, `frames not signed with the presenter's share key do not open (${JSON.stringify(resigned)})`);
+const resumed = await B.p.evaluate(() => window.__den.voice.openedScreen);
+ok(await until(B.p, ([n]) => window.__den.voice.openedScreen > n, [resumed + 10], 10000), "with A's own share key again, they open");
 // A presenter the den names who is not a member of the room is no presenter.
 const forged = await B.p.evaluate(() => {
   const v = window.__den.voice;
@@ -402,6 +427,28 @@ ok(after.opened > before.opened + 50 && after.failed - before.failed < 5, `after
 seen.clear();
 for (let i = 0; i < 40 && seen.size < 2; i++) { seen.add(await colour()); await B.p.waitForTimeout(150); }
 ok(seen.size >= 2 && !seen.has('other'), `and B's picture still follows A's screen (${[...seen]})`);
+// B reloads mid-share (its page has no share key now) and comes back to voice:
+// it asks A for the share key, and the stage opens again.
+await B.p.reload({ waitUntil: 'networkidle' });
+ok(await inside(B.p), 'B is back in after a reload');
+await B.p.click('[data-room="general"]');
+await B.p.click('#voice-go');
+ok(await until(B.p, () => window.__den.voice?.pc?.connectionState === 'connected', null, 15000), 'B is back in voice');
+ok(await until(B.p, () => window.__den.voice.openedScreen > 5 && document.querySelector('#stage-video').videoWidth > 0, null, 15000), `B, back mid-share, gets A's share key and the stage opens (${await B.p.evaluate(() => JSON.stringify({ opened: window.__den.voice.openedScreen, failed: window.__den.voice.failedScreen }))})`);
+// B without A's share key, and nothing new in voice for A to send it again
+// for: B asks A for it, sealed to the room, and the stage opens.
+const asked = await B.p.evaluate(async ([a]) => {
+  const v = window.__den.voice;
+  window.__den.shareKeys?.clear();
+  v.sharePubs.clear();
+  v.worker.postMessage({ sharePubs: [] });
+  v.ch.trigger('screen', {});
+  v.ch.trigger('screen', { key: a });
+  const o0 = v.openedScreen;
+  for (let i = 0; i < 60 && !(v.sharePubs.has(a) && v.openedScreen > o0 + 5); i++) await new Promise((r) => setTimeout(r, 250));
+  return { has: v.sharePubs.has(a), opened: v.openedScreen - o0 };
+}, [A.me.key]);
+ok(asked.has && asked.opened > 5, `a viewer with no share key asks the presenter, and the stage opens (${JSON.stringify(asked)})`);
 await A.p.click('#voice-screen');
 ok(await until(B.p, () => document.querySelector('#stage').hidden, null, 5000), 'Stop sharing frees the stage');
 ok(await until(B.p, () => !document.querySelector('#voice-screen').disabled, null, 5000), 'and B may share again');

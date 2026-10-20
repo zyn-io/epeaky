@@ -7,11 +7,15 @@
 // counter is the send time in microseconds (kept rising), so a listener also
 // refuses a frame more than a minute old (a screen's, 15 s): the den cannot
 // replay what a member said or showed earlier to someone who joins later.
+// A screen frame is also signed, after sealing, with the presenter's own key
+// for that share (media-seal.js): every member can derive the presenter's
+// screen key, so the signature is what keeps another member, with the den's
+// help, from showing frames in the presenter's name.
 //
 // Streams arrive by transfer (Chrome) or through RTCRtpScriptTransform
 // (Safari, Firefox); relayed frames, one by one as messages.
 
-import { clearLength, sealFrame, openFrame, indexOf, tooOld, Window } from './media-seal.js';
+import { clearLength, sealFrame, openFrame, indexOf, tooOld, Window, signFrame, verifyFrame } from './media-seal.js';
 
 let keys = new Map(); // key index → Map(sender key hex → CryptoKey), 'den voice'
 let screenKeys = new Map(); // the same, 'den screen'
@@ -19,6 +23,8 @@ let current = -1;
 let me = '';
 let presenter = ''; // whose screen the stage carries, as the den names them
 let slots = new Map(); // slot → sender key hex
+let signer = null; // this device's signing key for its share, while it shares
+let sharePubs = new Map(); // member key hex → their share's verify key
 const voiceSeen = new Window();
 const screenSeen = new Window();
 let counter = Date.now() * 1000; // the send time in µs, and above any counter this device sent before
@@ -48,6 +54,8 @@ onmessage = (e) => {
     me = d.me;
   }
   if (typeof d.presenter === 'string') presenter = d.presenter;
+  if ('signer' in d) signer = d.signer;
+  if (d.sharePubs) sharePubs = new Map(d.sharePubs);
   if (d.slots) slots = new Map(d.slots);
   if (d.readable) pipe(d.readable, d.writable, d.mode, d.slot);
 };
@@ -74,17 +82,24 @@ async function seal(frame, kind = 'audio') {
   if (!key) throw new Error('no key');
   counter = Math.max(counter + 1, Date.now() * 1000);
   const data = new Uint8Array(frame.data);
-  frame.data = (await sealFrame(key, index, BigInt(counter), data, clearLength(data, kind))).buffer;
+  if (kind === 'screen' && !signer) throw new Error('no signer');
+  const box = await sealFrame(key, index, BigInt(counter), data, clearLength(data, kind));
+  frame.data = (kind === 'screen' ? await signFrame(signer, box) : box).buffer;
   sealed++;
   if (kind === 'screen') sealedScreen++;
   return frame;
 }
 
 // A frame opens only under the key of the member the den says it is from:
-// a slot's speaker, or the presenter on the stage.
+// a slot's speaker, or the presenter on the stage (signed with their share's key).
 async function open(frame, slot, kind = 'audio') {
-  const d = new Uint8Array(frame.data);
   const sender = kind === 'screen' ? presenter : slots.get(slot);
+  let d = new Uint8Array(frame.data);
+  if (kind === 'screen') {
+    const pub = sharePubs.get(sender);
+    if (!pub) throw new Error('no share key');
+    d = await verifyFrame(pub, d);
+  }
   const key = sender && (kind === 'screen' ? screenKeys : keys).get(indexOf(d))?.get(sender);
   if (!key) throw new Error('no key');
   const { plain, counter: n } = await openFrame(key, d, clearLength(d, kind));

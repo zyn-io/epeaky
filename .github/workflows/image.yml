@@ -1,8 +1,15 @@
 name: image
+# Every push to main: ghcr.io/zyn-io/epeaky:latest (and :sha-…), built and
+# tested on both architectures. A tag vX.Y.Z also makes a release: the image
+# under its version with a build-provenance attestation, and a GitHub Release
+# whose install.sh names that image by digest (what the site's one-liner and
+# `epeaky update` run). Actions are pinned to commits: this workflow pushes
+# the image every den runs.
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    # Releases are plain versions: no -rc, which `epeaky update` would install.
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
 permissions:
   contents: read
   packages: write
@@ -18,14 +25,14 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - id: arch
         run: echo "name=${PLATFORM#linux/}" >> "$GITHUB_OUTPUT"
         env:
           PLATFORM: ${{ matrix.platform }}
       - name: Build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -71,18 +78,28 @@ jobs:
           ! curl -sf -o /dev/null http://127.0.0.1:2019/config/
           # Nothing of the den's listens beyond loopback (no mDNS, no Erlang).
           ! sudo ss -lntupH | grep -E '"(beam\.smp|epmd)"' | awk '{print $5}' | grep -Ev '^(127\.0\.0\.1|\[::1\]):'
-      - uses: docker/login-action@v3
+          # Caddy by digest. Run again, as `epeaky update` does: the den, its
+          # invites and the email given before all stay.
+          grep -Eq 'image: caddy:[0-9.]+@sha256:[0-9a-f]{64}$' /opt/epeaky/compose.yml
+          sudo EPEAKY_IMAGE=epeaky:test EPEAKY_NO_PULL=1 bash install.sh --email ops@example.org --yes >/dev/null
+          sudo EPEAKY_IMAGE=epeaky:test EPEAKY_NO_PULL=1 bash install.sh --yes | tee rerun.log
+          grep -q 'email ops@example.org' /opt/epeaky/Caddyfile
+          grep -q 'Make an invite with' rerun.log
+          sudo epeaky invites | grep -q 'open until'
+          for i in $(seq 1 30); do curl -ksf -o /dev/null --resolve den.localhost:443:127.0.0.1 https://den.localhost/door/ways && break; sleep 2; done
+          curl -ksf --resolve den.localhost:443:127.0.0.1 https://den.localhost/door/ways | grep -q '"invite":true'
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/${{ github.repository }}
       - id: push
         name: Push by digest
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -92,7 +109,7 @@ jobs:
       - run: mkdir -p digests && touch "digests/${DIGEST#sha256:}"
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: digest-${{ steps.arch.outputs.name }}
           path: digests/*
@@ -102,20 +119,27 @@ jobs:
   publish:
     needs: image
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: digests
           pattern: digest-*
           merge-multiple: true
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -128,3 +152,48 @@ jobs:
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
           docker buildx imagetools inspect ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}
+      - id: digest
+        name: The digest both architectures share
+        run: |
+          d=$(docker buildx imagetools inspect "ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$d" >> "$GITHUB_OUTPUT"
+      # Who built it, from which commit, by which workflow: signed through
+      # Sigstore and stored with the image (gh attestation verify oci://…).
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+
+  # A version's release: its installer, pinned to the image's digest, and that
+  # installer's SHA-256.
+  release:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: The installer, pinned
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}@${{ needs.publish.outputs.digest }}
+        run: |
+          mkdir out
+          sed "s|^RELEASE_IMAGE=\$|RELEASE_IMAGE=$IMAGE|" install.sh > out/install.sh
+          grep -Eqx "RELEASE_IMAGE=ghcr\.io/${{ github.repository }}@sha256:[0-9a-f]{64}" out/install.sh
+          bash -n out/install.sh
+          (cd out && sha256sum install.sh > install.sh.sha256 && cat install.sh.sha256)
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ghcr.io/${{ github.repository }}@${{ needs.publish.outputs.digest }}
+        run: |
+          # Latest (what installs and `epeaky update` take) only if no version
+          # tag is higher: a fix cut for an older version updates no den.
+          top=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --jq '.[].ref | ltrimstr("refs/tags/")' | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1)
+          latest=false; [ "$top" = "$GITHUB_REF_NAME" ] && latest=true
+          gh release create "$GITHUB_REF_NAME" out/install.sh out/install.sh.sha256 --verify-tag --latest="$latest" --title "Epeaky $GITHUB_REF_NAME" \
+            --notes "Image: \`$IMAGE\`. Install: \`curl --proto '=https' --tlsv1.2 -fsSL https://epeaky.zyn-network.com/install.sh | sudo bash\`; update a den with \`epeaky update\`. Changes: DEVLOG.md."

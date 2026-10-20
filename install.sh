@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Epeaky: a den on this server, behind Caddy (TLS from Let's Encrypt).
 #
-#   curl -fsSL https://epeaky.zyn-network.com/install.sh | sudo bash
+#   curl --proto '=https' --tlsv1.2 -fsSL https://epeaky.zyn-network.com/install.sh | sudo bash
 #   sudo bash install.sh --domain chat.example.org [--email you@example.org] [--yes]
 #
 # Needs: Linux (x86-64 or arm64), a domain whose A/AAAA record points here, TCP 80 and
 # 443 open, and UDP 50000-50199 for voice. Installs Docker if it is missing
-# (after asking). Everything lives in /opt/epeaky; run it again to update.
+# (after asking). Everything lives in /opt/epeaky; `epeaky update` runs the newest
+# release's installer again.
 set -euo pipefail
 
 # All of it inside main, run on the last line: under `curl … | bash` the
@@ -14,7 +15,13 @@ set -euo pipefail
 # command can read from that input in its place.
 main() {
 DIR=/opt/epeaky
-IMAGE=${EPEAKY_IMAGE:-ghcr.io/zyn-io/epeaky:latest}
+# A release's installer names its image by digest: the release job fills in
+# this line, so what runs is what that release built and tested. The
+# repository's own copy runs the newest build of main.
+RELEASE_IMAGE=
+IMAGE=${EPEAKY_IMAGE:-${RELEASE_IMAGE:-ghcr.io/zyn-io/epeaky:latest}}
+# Caddy by digest too (2.11.7, every architecture): a tag can be moved.
+CADDY_IMAGE=caddy:2.11.7@sha256:685ae3d7c34d9b5f8caeddc5d14051db7bbd88ff1f5a2fa0c16bd8ca328fb7af
 DOMAIN=${EPEAKY_DOMAIN:-}
 EMAIL=${EPEAKY_EMAIL:-}
 YES=0
@@ -108,6 +115,11 @@ else
   sed -i "s/^PHX_HOST=.*/PHX_HOST=$DOMAIN/" "$DIR/.env"
 fi
 
+# Run again (an update), the den keeps the email it had.
+if [ -z "$EMAIL" ] && [ -f "$DIR/Caddyfile" ]; then
+  EMAIL=$(sed -n 's/^[[:space:]]*email \([^[:space:]]*\)$/\1/p' "$DIR/Caddyfile" | head -1)
+fi
+
 # No admin API: anything on this machine (the den's container shares its
 # network) could otherwise reconfigure Caddy on localhost:2019.
 cat > "$DIR/Caddyfile" <<CADDY
@@ -134,7 +146,7 @@ services:
       - ./data:/var/lib/den
     restart: unless-stopped
   caddy:
-    image: caddy:2
+    image: $CADDY_IMAGE
     network_mode: host
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
@@ -154,7 +166,9 @@ else
 fi
 
 # ---- The host's command ---------------------------------------------------------------
-cat > /usr/local/bin/epeaky <<'CLI'
+# Written beside it, then moved into place: `epeaky update` runs this script
+# from inside the old command, and bash goes on reading that file after.
+cat > /usr/local/bin/epeaky.new <<'CLI'
 #!/usr/bin/env bash
 # Epeaky's host commands, against the den in /opt/epeaky.
 set -euo pipefail
@@ -177,7 +191,12 @@ case "${1:-help}" in
             esac ;;
   audit)    n=${2:-30}; case "$n" in *[!0-9]*) echo "epeaky audit [N]: a number" >&2; exit 2 ;; esac; rpc "Den.Host.audit($n)" ;;
   logs)     n=${2:-100}; case "$n" in *[!0-9]*) echo "epeaky logs [N]: a number" >&2; exit 2 ;; esac; docker compose logs --tail "$n" den ;;
-  update)   docker compose pull && docker compose up -d ;;
+  # The newest release's installer (its image by digest), run again here: it
+  # keeps .env and the data, and brings the Caddyfile and this command up to date.
+  update)   f=$(mktemp) && trap 'rm -f "$f"' EXIT
+            curl --proto '=https' --tlsv1.2 -fsSL https://github.com/zyn-io/epeaky/releases/latest/download/install.sh -o "$f" \
+              || { echo "epeaky update: could not fetch the newest release's installer" >&2; exit 1; }
+            bash "$f" --yes ;;
   *) cat <<HELP
 epeaky invite [N] [DAYS]   N one-use invite links, good for DAYS days (1, 7)
 epeaky invites             invites made, used, withdrawn
@@ -189,13 +208,13 @@ epeaky owner [m-xxxxxx]    the den's owner; or make the device with that name th
                            (it must have entered today); --clear for none
 epeaky audit [N]           what moderators did, the last N entries (30)
 epeaky logs [N]            the den's last N log lines
-epeaky update              pull the latest image and restart
+epeaky update              the newest release: its image, and this command
 Settings: /opt/epeaky/.env (then: cd /opt/epeaky && docker compose up -d)
 HELP
   ;;
 esac
 CLI
-chmod 755 /usr/local/bin/epeaky
+chmod 755 /usr/local/bin/epeaky.new && mv -f /usr/local/bin/epeaky.new /usr/local/bin/epeaky
 
 # ---- Start ------------------------------------------------------------------------------
 cd "$DIR"
