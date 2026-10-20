@@ -12,7 +12,7 @@ WEB=$(cd "$(dirname "$0")" && pwd)
 OUT=${1:-$WEB/../server/priv/page}
 ADDON=${2:-}
 rm -rf "$OUT" && mkdir -p "$OUT/den"
-cp "$WEB"/{index.html,base.css,den.css,app.js,gate.js,den.js,den-ui.js,den-admin.js,config.json} "$OUT/"
+cp "$WEB"/{index.html,base.css,den.css,app.js,gate.js,passkey.js,den.js,den-ui.js,den-admin.js,config.json} "$OUT/"
 cp "$WEB"/{manifest.webmanifest,sw.js} "$OUT/"
 cp -R "$WEB/icons" "$OUT/icons"
 cp "$WEB/voice-worker.js" "$OUT/den/voice-worker.js"
@@ -30,7 +30,7 @@ if [ -n "$ADDON" ]; then
   # An add-on's own page must keep every element the scripts look up that
   # the core page has: most are used without a check, so one missing breaks
   # the page. Only the ways in a den may leave out are optional.
-  optional=" way-ask ask-note way-invite enter "
+  optional=" way-ask ask-note way-invite enter passkey-enter save-passkey "
   used=$(grep -ohE "el\('[a-z0-9-]+'\)|getElementById\('[a-z0-9-]+'\)" "$WEB"/app.js "$WEB"/den-ui.js "$WEB"/den-admin.js | grep -oE "'[a-z0-9-]+'" | tr -d "'" | sort -u)
   missing=()
   for id in $used; do

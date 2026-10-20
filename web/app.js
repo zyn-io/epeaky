@@ -4,6 +4,7 @@
 import { DenClient } from './den.js';
 import { mountDen } from './den-ui.js';
 import { enter as gate } from './gate.js';
+import { passFromPasskey, passkeys } from './passkey.js';
 
 const el = (id) => document.getElementById(id);
 const config = await fetch('./config.json', { credentials: 'omit' }).then((r) => r.json());
@@ -64,6 +65,7 @@ function wait() {
 
 function door(asking) {
   if (config.issuer) show('enter');
+  if (passkeys()) show('passkey-enter');
   if (ways.invite) show('way-invite');
   if (ways.approval) show('way-ask');
   if (asking?.status === 'pending') return wait();
@@ -90,6 +92,22 @@ if (enter) {
     } catch (e) {
       say(e?.message || String(e), !e?.quiet);
     } finally { enter.disabled = false; }
+  };
+}
+// A passkey that holds a pass saved from inside: in with that pass, through
+// the door as always, on this device's own (perhaps new) key.
+const withPasskey = el('passkey-enter');
+if (withPasskey) {
+  withPasskey.onclick = async () => {
+    withPasskey.disabled = true;
+    try {
+      const code = await passFromPasskey();
+      say('The door is checking your pass…');
+      open(await den.fromPass(code));
+      say('');
+    } catch (e) {
+      say(e?.message || String(e), !e?.quiet);
+    } finally { withPasskey.disabled = false; }
   };
 }
 const askForm = el('way-ask');

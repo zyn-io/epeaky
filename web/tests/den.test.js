@@ -19,7 +19,7 @@ test('the page says what the server can see, inline, before anyone enters', asyn
 });
 
 test('the core page has nothing of the Cave or Zyn in it', async () => {
-  for (const f of ['../index.html', '../app.js', '../gate.js', '../base.css', '../den.css', '../config.json']) {
+  for (const f of ['../index.html', '../app.js', '../gate.js', '../passkey.js', '../base.css', '../den.css', '../config.json']) {
     assert.doesNotMatch(await read(f), /cavebro|Cave|Zyn|Nap\b|Collection Z|Diggers|Lookouts|Lanterns/, f);
   }
 });

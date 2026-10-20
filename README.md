@@ -309,7 +309,10 @@ bin/den rpc 'Den.Host.members()'              # how many, by the way they joined
 ```
 
 A device keeps its pass code and gets its next days' tokens itself, so a
-member enters once and stays in until the host removes the pass. The door
+member enters once and stays in until the host removes the pass. A member can
+also save the pass to a passkey (“Save pass to a passkey”), and come back
+with it after the browser's data is cleared (“Enter with a passkey”), on a
+new device key: their words and private rooms stay with the old device. The door
 signs tomorrow's tokens only late in the day (from 22:00 UTC,
 `DEN_TOMORROW_FROM`): a pass removed before then lets no device in after
 midnight; one removed later, by the end of the next day.

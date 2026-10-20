@@ -69,6 +69,18 @@ paths. Blind tokens are no protection against an operator who correlates.
 can sign tokens for devices of its own, which appear as new, anonymous
 members of open rooms.
 
+**A pass saved to a passkey.** A member may save the pass their device keeps
+to a passkey, so a browser whose data was cleared (or that dropped it) can
+come back in. The pass is the passkey's user id: the password manager gives
+it only to the den's own address, after the member unlocks it, and the page
+takes it from there to the door as any kept pass. The den is not told, and
+the passkey's signature is not checked: the passkey is only somewhere to keep
+the pass. Whoever can use the member's passkeys (their Apple, Google or
+password manager account) can therefore enter as a member, on any device
+those passkeys reach, until the host removes the pass. What comes back is
+the pass alone, on a new device key: no words, no private rooms, and no room
+keys, which are never copied off a device, so none is used twice.
+
 **Leaving.** Removing a pass stops new tokens, but a device may hold
 tomorrow's token, which the door signs only from 22:00 UTC (the host's
 `DEN_TOMORROW_FROM`): a pass removed before then admits nobody after midnight

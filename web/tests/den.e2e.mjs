@@ -101,6 +101,7 @@ ok(await inside(a.p), 'A is in through an invite link');
 ok(!(await a.p.evaluate(() => location.hash)), 'the invite code is taken off the address at once');
 const reuse = await person('A2', `${DEN}/#invite=${invite}`);
 ok(await until(reuse.p, () => /used, withdrawn or has expired/.test(document.querySelector('#chat-out')?.textContent || ''), null, 10000), 'a used invite lets nobody else in');
+ok(await reuse.p.evaluate(async () => { const kv = window.__den.kv; await kv.wipe(); try { await kv.put('x', 1); return (await kv.get('x')) === undefined; } catch (e) { return e.message; } }) === true, 'a device forgotten while it still writes keeps nothing, and nothing fails');
 await reuse.ctx.close();
 
 // B: the host's issuer window.
@@ -132,6 +133,19 @@ const swapped = await c.p.evaluate(async () => {
   return den.dayKey(d).then(() => 'accepted', (e) => e.message);
 });
 ok(/different door key/.test(swapped), 'a day key different from the pinned one is refused');
+// Its pass, saved to a passkey (Chrome's virtual authenticator stands in for
+// the password manager): the passkey's user id is the pass this device keeps.
+const cdp = await c.ctx.newCDPSession(c.p);
+await cdp.send('WebAuthn.enable');
+const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
+ok(await c.p.isVisible('#save-passkey'), 'the device offers to save its pass to a passkey');
+await c.p.click('#save-passkey');
+ok(await until(c.p, () => document.querySelector('#ask')?.open && /Apple, Google or password manager/.test(document.querySelector('#ask .ask-text').textContent), null, 5000), 'before saving, it says who else could then enter');
+await c.p.click('#ask [data-yes]');
+ok(await until(c.p, () => /Saved to a passkey/.test(document.querySelector('#den-status')?.textContent || ''), null, 10000), 'the pass is saved to a passkey');
+const [cred] = (await cdp.send('WebAuthn.getCredentials', { authenticatorId })).credentials;
+const cPass = await c.p.evaluate(() => window.__den.kv.get('pass'));
+ok(cred?.isResidentCredential && Buffer.from(cred.userHandle, 'base64').toString('hex') === cPass, 'the passkey holds this device\'s pass, and nothing else');
 // Forget this device: everything it keeps is gone, and it is outside again.
 const cBefore = (await meOf(c.p)).key;
 await c.p.click('#forget');
@@ -139,6 +153,12 @@ await c.p.click('#ask [data-yes]');
 await c.p.waitForLoadState('networkidle');
 ok(await until(c.p, () => document.querySelector('#den')?.hidden && !document.querySelector('.ledger')?.hidden, null, 15000), 'forgetting the device puts it back outside the door');
 ok((await meOf(c.p)).key !== cBefore, 'and it comes back as a new device, with nothing of the old one');
+// With its data gone, the passkey lets it back in: its pass, on a new device key.
+ok(await c.p.isVisible('#passkey-enter'), 'the door offers a passkey');
+await c.p.click('#passkey-enter');
+ok(await inside(c.p), 'the passkey lets the device back in with its old pass');
+ok(await c.p.evaluate(() => window.__den.kv.get('pass')) === cPass, 'and the device keeps that pass again');
+ok(await until(c.p, () => window.__den.members('general').some((m) => m.key === window.__den.me.key), null, 40000), 'and is back in General');
 await c.ctx.close();
 const A = { p: a.p, me: await meOf(a.p) };
 const B = { p: bb.p, me: await meOf(bb.p) };

@@ -162,8 +162,13 @@ function store(name, prefix) {
     r.onsuccess = () => resolve(r.result);
     r.onerror = () => reject(r.error);
   });
+  // Once wiped, nothing more is kept: a write still on its way (a timer, a
+  // socket event) before the page reloads finds the store gone, not an error.
+  let gone = false;
   const tx = async (mode, f) => {
+    if (gone) return undefined;
     const d = await db;
+    if (gone) return undefined;
     return new Promise((resolve, reject) => {
       const t = d.transaction('kv', mode);
       const r = f(t.objectStore('kv'));
@@ -174,6 +179,7 @@ function store(name, prefix) {
   return {
     /// Everything this device keeps, gone: the database itself is deleted.
     wipe: async () => {
+      gone = true;
       (await db).close();
       await new Promise((resolve, reject) => { const r = indexedDB.deleteDatabase(name); r.onsuccess = resolve; r.onerror = () => reject(r.error); r.onblocked = resolve; });
     },
@@ -1859,6 +1865,9 @@ export class DenClient {
   async keepsPass() {
     return (await this.kv.get('keep_pass')) !== false;
   }
+
+  /// The pass this device keeps, if it keeps one (to save to a passkey).
+  keptPass() { return this.kv.get('pass'); }
 
   async setKeepPass(on) {
     await this.kv.put('keep_pass', !!on);

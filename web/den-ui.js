@@ -4,6 +4,7 @@
 
 import { REACTIONS as EMOJI, imageSize, inviteLink } from './den.js';
 import { mountAdmin, slowName } from './den-admin.js';
+import { passkeys, savePasskey } from './passkey.js';
 const GROUP_MS = 5 * 60_000;
 // One line of text with nothing hidden in it: no bidirectional or zero-width
 // controls (which can make a name or a file name read backwards), and
@@ -1223,10 +1224,20 @@ export function mountDen(den, el, me) {
     den.keepsPass().then((on) => { keep.checked = on; });
     keep.onchange = () => den.setKeepPass(keep.checked);
   }
+  const passkey = el('save-passkey');
+  if (passkey && passkeys()) {
+    passkey.hidden = false;
+    passkey.onclick = async () => {
+      const code = await den.keptPass();
+      if (!code) return status('This device keeps no pass: turn on “Keep this device\'s pass” and come back in first.');
+      if (!(await ask({ heading: 'Save the pass to a passkey?', text: 'Your password manager keeps this device\'s pass, so this browser can come back in after its data is cleared, and so can any device that has your passkeys. Anyone who can use your passkeys (your Apple, Google or password manager account) can then enter this den as a member. Your words and private rooms are not in it.', yes: 'Save' }))) return;
+      try { await savePasskey(code, location.host); status('Saved to a passkey.'); } catch (e) { status(e.message); }
+    };
+  }
   const forgetButton = el('forget');
   if (forgetButton) {
     forgetButton.onclick = async () => {
-      if (!(await ask({ heading: 'Forget this device?', text: 'Its chat name, its pass, its rooms and every word it keeps are deleted from this browser. To come back it needs a new way in.', yes: 'Forget', danger: true }))) return;
+      if (!(await ask({ heading: 'Forget this device?', text: 'Its chat name, its pass, its rooms and every word it keeps are deleted from this browser. A passkey you saved the pass to stays in your password manager. To come back it needs a new way in.', yes: 'Forget', danger: true }))) return;
       forgetButton.disabled = true;
       await den.forget();
       location.reload();
