@@ -12,7 +12,8 @@ const quiet = (m) => Object.assign(new Error(m), { quiet: true });
 const cancelled = (e) => e?.name === 'NotAllowedError' || e?.name === 'AbortError';
 
 /// Whether this browser makes passkeys here.
-export const passkeys = () => typeof PublicKeyCredential !== 'undefined' && globalThis.isSecureContext === true && !!navigator.credentials?.create;
+/// (Epeaky's iPhone app says whether its web view may, for this den.)
+export const passkeys = () => globalThis.epeakyApp?.passkeys !== false && typeof PublicKeyCredential !== 'undefined' && globalThis.isSecureContext === true && !!navigator.credentials?.create;
 
 /// A passkey for this den holding `code`. Saving again for the same pass
 /// replaces it in the password manager (same site, same user id).

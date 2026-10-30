@@ -17,7 +17,12 @@ defmodule DenWeb.LobbyChannel do
 
   Pushes (Den.Push): "push_key" → the den's public push key; "push_sub"
   {endpoint, p256dh, auth, mode} → this device's push address; "push_off"
-  {endpoint} → no more pushes there. After a
+  {endpoint} → no more pushes there.
+
+  Reports (Den.Reports): "report_message" {room, msg, sender, reason, words?} from any
+  member; "reports" and "report_done" {id} for the owner and Manage messages.
+  "leave_den": this device deletes its account (its pass goes at the door,
+  POST /door/leave). After a
   change everyone is sent "mod" (roles, holders, sanctions, the den's name),
   "room" or "room_gone".
   """
@@ -221,7 +226,47 @@ defmodule DenWeb.LobbyChannel do
 
   defp handle("push_off", %{"endpoint" => ep}, socket), do: (Den.Push.unsubscribe(socket.assigns.key, ep); {:reply, {:ok, %{}}, socket})
 
+  defp handle("report_message", p, socket) when is_map(p) do
+    case Den.Reports.file(me(socket), p) do
+      {:ok, id} ->
+        {:reply, {:ok, %{id: id}}, socket}
+
+      {:error, why} ->
+        {:reply, {:error, %{reason: said(why, "report")}}, socket}
+    end
+  end
+
+  defp handle("reports", _, socket) do
+    if Den.Reports.reader?(me(socket)),
+      do: {:reply, {:ok, %{reports: for(r <- Den.Reports.list(), do: %{r | at: unix(r.at), done_at: unix(r.done_at)})}}, socket},
+      else: no(:forbidden, socket)
+  end
+
+  defp handle("report_done", %{"id" => id}, socket) do
+    with true <- Den.Reports.reader?(me(socket)) || {:error, :forbidden},
+         :ok <- Den.Reports.done(me(socket), id) do
+      Den.Mod.log(me(socket), "report done", nil, nil)
+      {:reply, :ok, socket}
+    else
+      {:error, why} -> no(why, socket)
+    end
+  end
+
+  # Deleting an account: the device's day ends now and its invitations and
+  # push addresses go; once it has its answer, every room hears it left.
+  defp handle("leave_den", _, socket) do
+    Rooms.forget_device(me(socket))
+    Process.send_after(self(), :expel_me, 200)
+    {:reply, :ok, socket}
+  end
+
   defp handle(_, _, socket), do: {:reply, {:error, %{reason: "unknown"}}, socket}
+
+  @impl true
+  def handle_info(:expel_me, socket) do
+    Rooms.expel(me(socket))
+    {:noreply, socket}
+  end
 
   defp me(socket), do: socket.assigns.key
   defp unix(nil), do: nil
@@ -243,6 +288,12 @@ defmodule DenWeb.LobbyChannel do
   defp no(why, socket), do: {:reply, {:error, %{reason: said(why, "mod")}}, socket}
 
   # What a member reads when the den says no.
+  defp said(:quota, "report"), do: "That is enough reports for today. Try again tomorrow."
+  defp said(:report, _), do: "That is not a message to report."
+  defp said(:self, "report"), do: "You cannot report your own message."
+  defp said(:reason, "report"), do: "Say why, in up to 300 characters."
+  defp said(:words, _), do: "The message's words are too long to include."
+  defp said(:not_in_room, _), do: "You can report messages only in rooms you are in."
   defp said(:quota, "room"), do: "A device can open 3 rooms a day. Try again tomorrow."
   defp said(:quota, "private"), do: "A device can start 50 private rooms a day. Try again tomorrow."
   defp said(:quota, "claim"), do: "That is enough invitations for today. Try again tomorrow."

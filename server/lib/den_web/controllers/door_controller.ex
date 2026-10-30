@@ -66,6 +66,21 @@ defmodule DenWeb.DoorController do
     end
   end
 
+  @doc "A member deletes their account: their pass, by its code (as the door is shown it to sign), comes off the member list."
+  def leave(conn, %{"code" => code}) do
+    with true <- Den.Gate.module() == Members || {:error, :closed},
+         {:ok, c} <- Den.Gate.code(code),
+         :ok <- Members.remove(Base.encode16(Members.hash(c), case: :lower)) do
+      json(conn, %{ok: true})
+    else
+      :error -> fail(conn, :code)
+      {:error, :pass} -> fail(conn, :not_live)
+      {:error, why} -> fail(conn, why)
+    end
+  end
+
+  def leave(conn, _), do: fail(conn, :code)
+
   def join(conn, %{"invite" => invite, "pass" => pass}), do: done(conn, Members.join(invite, pass))
   def join(conn, _), do: fail(conn, :invite)
 

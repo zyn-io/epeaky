@@ -518,6 +518,14 @@ defmodule Den.Rooms do
     :ok
   end
 
+  @doc "A device that deleted its account: its day ends now, its invitations and push addresses go."
+  def forget_device(key) do
+    Repo.update_all(from(d in Device, where: d.key == ^key), set: [until: DateTime.add(now(), -1, :second)])
+    Repo.delete_all(from k in "key_packages", where: k.key == ^key)
+    Repo.delete_all(from s in "push_subs", where: s.key == ^key)
+    :ok
+  end
+
   def device_until(key) do
     case Repo.get(Device, key) do
       nil -> nil

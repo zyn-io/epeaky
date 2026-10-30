@@ -82,6 +82,7 @@ const ICON = {
   del: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4h10M6 4V2.5h4V4M4.5 4l.7 9.5h5.6L11.5 4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
   file: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.5h5l3.5 3.5v9.5H4z M9 1.5V5h3.5" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>',
   board: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4 11V8M7 11V5.5M10 11V7M13 11V4.5" stroke="currentColor" stroke-width="1.3"/></svg>',
+  flag: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 14.5V2M3.5 2.5h8l-1.8 3 1.8 3h-8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>',
 };
 
 /// `apps.cashboard`: the host's Cashboard settings ({ codes }), when it turned Cashboard on.
@@ -92,6 +93,8 @@ export function mountDen(den, el, me, apps = {}) {
   let screen = 'list';
   /// Whether the open room is in front of its reader: on a phone, only in a chat.
   const looking = () => !phone.matches || screen === 'chat';
+  // Epeaky's iPhone app, when this page runs in it: its push address, and switching dens.
+  const app = typeof globalThis.epeakyApp?.call === 'function' ? globalThis.epeakyApp : null;
   // Cashboard: whether it is on screen, its connection once framed, and boards waiting for it.
   let appOpen = false;
   let cashboard = null;
@@ -114,6 +117,15 @@ export function mountDen(den, el, me, apps = {}) {
   // Rooms this device hears nothing from (kept in this browser).
   const muted = new Set((() => { try { return JSON.parse(localStorage.getItem('den.muted') || '[]'); } catch { return []; } })());
   const keepMuted = () => { try { localStorage.setItem('den.muted', JSON.stringify([...muted])); } catch { /* not kept */ } };
+  // Members this device blocked: their messages are hidden here and never
+  // notify (kept in this browser; a linked device of theirs counts too).
+  const blocked = new Set((() => { try { return JSON.parse(localStorage.getItem('den.blocked') || '[]'); } catch { return []; } })());
+  const isBlocked = (key) => !!key && !den.isMe(key) && [key, ...den.linkedTo(key)].some((k) => blocked.has(k));
+  function setBlocked(key, on) {
+    for (const k of [key, ...den.linkedTo(key)]) (on ? blocked.add(k) : blocked.delete(k));
+    try { localStorage.setItem('den.blocked', JSON.stringify([...blocked])); } catch { /* not kept */ }
+    drawLog();
+  }
   const shown = [];
 
   const rooms = () => [...den.rooms.values()];
@@ -244,7 +256,7 @@ export function mountDen(den, el, me, apps = {}) {
       // A private room of two is named after the other person: their words need no name.
       const pair = others.length > 0 && title(r) === display(others[0].key);
       const who = !m ? '' : den.isMe(m.key) ? 'You: ' : pair ? '' : `${display(m.key)}: `;
-      const what = !m ? (r.kind === 'private' && !den.inRoom(r.id) ? 'Waiting for the invitation to arrive.' : 'No messages yet.') : m.deleted ? 'Message deleted' : m.file ? m.file.name : m.text || '';
+      const what = !m ? (r.kind === 'private' && !den.inRoom(r.id) ? 'Waiting for the invitation to arrive.' : 'No messages yet.') : isBlocked(m.key) ? 'Message from a member you blocked' : m.deleted ? 'Message deleted' : m.file ? m.file.name : m.text || '';
       const pic = pair ? mark(others[0].key, 48) : `<span class="chat-pic" aria-hidden="true">${r.kind === 'open' ? '#' : esc(plain(title(r)).slice(0, 1))}</span>`;
       return `<button type="button" class="chat${unread ? ' unread' : ''}" data-room="${esc(r.id)}">${pic}<span class="chat-main"><span class="chat-top"><b class="chat-name">${esc(title(r))}</b>${m ? `<time datetime="${new Date(m.at).toISOString()}">${esc(when(m.at))}</time>` : ''}</span><span class="chat-bottom"><span class="chat-last">${esc(plain(`${who}${what}`).slice(0, 140))}</span>${muted.has(r.id) ? '<span class="chat-muted">Muted</span>' : ''}${unread ? `<span class="badge" aria-label="${unread} unread">${unread > 99 ? '99+' : unread}</span>` : ''}</span></span></button>`;
     };
@@ -321,7 +333,8 @@ export function mountDen(den, el, me, apps = {}) {
 
   /// A small form in a dialog: a heading, a line, an optional field; resolves
   /// with the field's value (or true), or null when closed.
-  function ask({ heading, text = '', field = null, yes, danger = false, value = '', empty = false, readonly = false }) {
+  /// With `check`, a box under the field: resolves with { value, check }.
+  function ask({ heading, text = '', field = null, yes, danger = false, value = '', empty = false, readonly = false, check = null }) {
     const d = el('ask');
     d.querySelector('h2').textContent = heading;
     d.querySelector('.ask-text').textContent = text;
@@ -331,6 +344,10 @@ export function mountDen(den, el, me, apps = {}) {
     const input = label.querySelector('input');
     if (field) { label.querySelector('span').textContent = field; input.value = value; }
     input.readOnly = !!readonly;
+    const box = d.querySelector('.ask-check');
+    box.hidden = !check;
+    box.querySelector('input').checked = false;
+    if (check) box.querySelector('span').textContent = check;
     const ok = d.querySelector('[data-yes]');
     ok.textContent = yes;
     ok.classList.toggle('danger', danger);
@@ -342,7 +359,7 @@ export function mountDen(den, el, me, apps = {}) {
         e.preventDefault();
         const v = field ? input.value.trim() : true;
         if (field && !v && !empty) return;
-        answer = v;
+        answer = check ? { value: v, check: box.querySelector('input').checked } : v;
         d.close();
       };
       d.querySelector('[data-close]').onclick = () => d.close();
@@ -432,6 +449,10 @@ export function mountDen(den, el, me, apps = {}) {
       parts.push(`<li class="note" data-id="${esc(m.id)}"><span>${esc(m.who ? `${display(m.who)} ${m.act}` : m.text)}</span> <time datetime="${new Date(m.at).toISOString()}">${time(m.at)}</time></li>`);
       return parts.join('');
     }
+    if (isBlocked(m.key)) {
+      parts.push(`<li class="note blocked" data-id="${esc(m.id)}"><span>Message from a member you blocked</span></li>`);
+      return parts.join('');
+    }
     const cont = prev && !m.reply && prev.key === m.key && !prev.deleted && m.at - prev.at < GROUP_MS && !parts.length;
     const own = m.key === me.key;
     const head = `<p class="msg-head">${whoHtml(m.key)}${den.isMe(m.key) ? '<span class="you">you</span>' : ''}<time datetime="${new Date(m.at).toISOString()}" title="${esc(new Date(m.at).toLocaleString())}">${time(m.at)}</time>${m.edited && !m.deleted ? '<span class="edited">edited</span>' : ''}</p>`;
@@ -476,6 +497,7 @@ export function mountDen(den, el, me, apps = {}) {
         ${den.mayPost(room) ? (() => { const on = (pinCache[room] || []).some((p) => p.of === m.id && p.by === me.key); return `<button type="button" data-act="pin" aria-label="${on ? 'Unpin' : 'Pin'}" title="${on ? 'Unpin' : 'Pin for everyone, also who joins later'}" aria-pressed="${on}">${ICON.pin}</button>`; })() : ''}
         ${own && !m.file && !m.task ? `<button type="button" data-act="edit" aria-label="Edit" title="Edit">${ICON.edit}</button>` : ''}
         ${own ? `<button type="button" data-act="del" aria-label="Delete" title="Delete">${ICON.del}</button>` : ''}
+        ${!den.isMe(m.key) ? `<button type="button" data-act="report" aria-label="Report" title="Report to the den's moderators">${ICON.flag}</button>` : ''}
         ${!own && den.can('manage_messages') && den.rooms.get(room)?.kind !== 'private' ? `<button type="button" data-act="moddel" aria-label="Delete (moderator)" title="Delete (moderator)">${ICON.del}</button>` : ''}
       </div>
     </li>`);
@@ -628,6 +650,7 @@ export function mountDen(den, el, me, apps = {}) {
     if (!m || !t.dataset.act) return;
     if (t.dataset.act === 'reply') { reply = m; editing = null; drawComposer(); el('say-text').focus(); }
     if (t.dataset.act === 'edit') startEdit(m);
+    if (t.dataset.act === 'report') report(m);
     if (t.dataset.act === 'task-cancel') den.taskState(room, m.id, 'canceled').then(() => status('Task canceled.'), (err) => status(err.message));
     if (t.dataset.act === 'pin') {
       const had = (pinCache[room] || []).find((p) => p.of === m.id && p.by === me.key);
@@ -1027,7 +1050,9 @@ export function mountDen(den, el, me, apps = {}) {
     syncPush();
   };
   // What a push is, said where the choice is made.
-  el('notify').closest('label')?.insertAdjacentHTML('afterend', '<p class="push-note">With this page closed, notifications come through your browser’s push service (Apple, Google, Mozilla or Microsoft). It sees when one arrives, from which den, and which of its users get pushes from that den around the same time; a push names the room, never the words. With “Mentions and private”, a closed page hears of private rooms only: the den cannot see mentions.</p>');
+  el('notify').closest('label')?.insertAdjacentHTML('afterend', app
+    ? '<p class="push-note">With the app closed, notifications come through Epeaky’s push relay and Apple’s push service. They see when one arrives and from which den; a push names the room, never the words, and only this phone can open it. With “Mentions and private”, a closed app hears of private rooms only: the den cannot see mentions.</p>'
+    : '<p class="push-note">With this page closed, notifications come through your browser’s push service (Apple, Google, Mozilla or Microsoft). It sees when one arrives, from which den, and which of its users get pushes from that den around the same time; a push names the room, never the words. With “Mentions and private”, a closed page hears of private rooms only: the den cannot see mentions.</p>');
 
   // Installed on the home screen: its own window, notifications on iPhone, and
   // this device's keys kept (Safari clears a site's data after a week unused).
@@ -1051,13 +1076,14 @@ export function mountDen(den, el, me, apps = {}) {
       if (outcome === 'accepted') document.getElementById('install-app')?.remove();
     };
   });
-  if (!standalone && /iPhone|iPad|iPod/.test(navigator.userAgent)) {
+  if (!standalone && !app && /iPhone|iPad|iPod/.test(navigator.userAgent)) {
     foot.insertAdjacentHTML('beforeend', '<p class="push-note">On iPhone: Share, then Add to Home Screen. Installed, this device keeps its keys and gets notifications.</p>');
   }
 
   /// This device's push address, in step with the setting: signed up when
   /// notifications are on and allowed, taken back when they are off.
   async function syncPush() {
+    if (app) return syncAppPush();
     if (!sw || !('PushManager' in window) || typeof Notification === 'undefined') return;
     try {
       let sub = await sw.pushManager.getSubscription();
@@ -1079,10 +1105,26 @@ export function mountDen(den, el, me, apps = {}) {
     }
   }
 
+  /// In Epeaky's iPhone app the push address is the app's (Apple's push
+  /// service, through Epeaky's relay); the den sends to it as to any other.
+  async function syncAppPush() {
+    try {
+      if (notify === 'off') {
+        const had = await app.call('push-off');
+        if (had?.endpoint) await den.pushOff(had.endpoint).catch(() => {});
+        return;
+      }
+      const sub = await app.call('push', { key: await den.pushKey() });
+      // Notifications turned off for the app in the phone's settings.
+      if (!sub?.endpoint) return;
+      await den.pushSub({ endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth, mode: notify === 'all' ? 'all' : 'private' });
+    } catch (e) { status(e.message); }
+  }
+
   function ping(room_, m, mention) {
     if (!document.hidden || notify === 'off' || typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
     const priv = den.rooms.get(room_)?.kind === 'private';
-    if (muted.has(room_)) return;
+    if (muted.has(room_) || isBlocked(m.key)) return;
     if (notify === 'mentions' && !mention && !priv) return;
     const opts = { body: plain(`${display(m.key)}: ${(m.text || m.file?.name || '').slice(0, 120)}`), tag: room_, data: { room: room_ } };
     // Installed, a page cannot make a Notification itself: its worker shows it.
@@ -1349,6 +1391,33 @@ export function mountDen(den, el, me, apps = {}) {
     };
   }
 
+  /// A message to the den's moderators, with a reason; its sender is then blocked on this device.
+  async function report(m) {
+    const a = await ask({ heading: `Report ${display(m.key)}’s message`, text: 'It goes to this den’s moderators with your reason. You will no longer see this member’s messages on this device; unblock them from their card.', field: 'Reason', yes: 'Report', check: 'Include the message’s words (the moderators will read them)' });
+    if (!a) return;
+    try {
+      await den.reportMessage(room, m, a.value, a.check ? (m.text || m.file?.name || '') : null);
+      setBlocked(m.key, true);
+      status('Reported. This member is blocked on this device.');
+    } catch (e) { status(e.message); }
+  }
+
+  const deleteButton = el('delete-account');
+  if (deleteButton) {
+    deleteButton.onclick = async () => {
+      if (!(await ask({ heading: 'Delete your account?', text: 'This device leaves every room, your pass is removed from this den so it cannot be used again, and everything this device keeps is deleted. Messages others already received stay with them. This cannot be undone.', yes: 'Delete account', danger: true }))) return;
+      deleteButton.disabled = true;
+      try {
+        await den.deleteAccount();
+        location.reload();
+      } catch (e) { deleteButton.disabled = false; status(e.message); }
+    };
+  }
+  if (app) {
+    el('forget').insertAdjacentHTML('beforebegin', '<button type="button" class="mini ghost" id="switch-den">Switch den</button>');
+    el('switch-den').onclick = () => app.call('switch').catch(() => {});
+  }
+
   // ---- Apps: Cashboard, framed, when the host turned it on -------------------------------
 
   const SEEN = 'den.cashboard';
@@ -1431,7 +1500,7 @@ export function mountDen(den, el, me, apps = {}) {
 
   // ---- The den itself: its name and icon, and its settings ------------------------------
 
-  const admin = mountAdmin(den, el, { display, whoHtml, mark, ask, status, known, pickMembers });
+  const admin = mountAdmin(den, el, { display, whoHtml, mark, ask, status, known, pickMembers, isBlocked, setBlocked });
   function drawDenHead() {
     const d = den.mod.den || {};
     const may = admin.sections().length > 0;

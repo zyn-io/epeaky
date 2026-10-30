@@ -46,6 +46,17 @@ defmodule Den.PushTest do
         do: assert(Push.endpoint_ok(ep) == {:error, :push_service}, inspect(ep))
   end
 
+  test "Epeaky's push relay (for its iPhone app) by default; a host lists its own, or none" do
+    assert Push.endpoint_ok("https://push.epeaky.zyn-network.com/w/abc") == :ok
+    assert Push.endpoint_ok("https://push.epeaky.zyn-network.com.evil.example/w/abc") == {:error, :push_service}
+    Application.put_env(:den, :push_relays, [])
+    assert Push.endpoint_ok("https://push.epeaky.zyn-network.com/w/abc") == {:error, :push_service}
+    Application.put_env(:den, :push_relays, ["relay.example.org"])
+    assert Push.endpoint_ok("https://relay.example.org/w/abc") == :ok
+  after
+    Application.delete_env(:den, :push_relays)
+  end
+
   test "the message decrypts as RFC 8291 says, for the browser alone" do
     {_, ua_pub, ua_priv, auth} = browser()
     body = Push.encrypt(~s({"title":"Builders"}), ua_pub, auth)

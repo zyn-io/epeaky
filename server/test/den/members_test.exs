@@ -107,6 +107,19 @@ defmodule Den.MembersTest do
     assert Members.join(invite, pass) == {:error, :closed}
   end
 
+  test "a member deletes their account at the door: their pass, by its code, comes off the list", %{conn: conn} do
+    [invite] = Members.invite(1, 7)
+    {code, pass} = device_pass()
+    assert Members.join(invite, pass) == :ok
+    {:ok, c} = Den.Gate.code(code)
+    assert Members.live?(c) == {:ok, true}
+    assert conn |> post("/door/leave", %{code: code}) |> json_response(200)
+    assert Members.live?(c) == {:ok, false}
+    assert build_conn() |> post("/door/leave", %{code: code}) |> json_response(403)
+    assert build_conn() |> post("/door/leave", %{code: "not hex"}) |> json_response(400)
+    assert build_conn() |> post("/door/leave", %{}) |> json_response(400)
+  end
+
   test "the endpoints: join, ask and its status, through HTTP", %{conn: conn} do
     [invite] = Members.invite(1, 7)
     {_, pass} = device_pass()

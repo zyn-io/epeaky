@@ -28,6 +28,7 @@ defmodule DenWeb.Router do
     get "/icon", DoorController, :icon
     post "/join", DoorController, :join
     post "/ask", DoorController, :ask
+    post "/leave", DoorController, :leave
     get "/ask/:id", DoorController, :asked
     post "/passes", DoorController, :register
     delete "/passes/:pass", DoorController, :remove

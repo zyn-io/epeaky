@@ -323,6 +323,22 @@ den. With pushes for private rooms only, those are small rooms: their
 members are the easier to tell. A member who does not want this keeps
 notifications to while the page is open.
 
+Epeaky's iPhone app gets no web push; its push address is at Epeaky's push
+relay (`push.epeaky.zyn-network.com`, `DEN_PUSH_RELAYS`), which takes the
+same encrypted push and hands it to Apple's APNs. The relay keeps no list:
+the address carries the phone's APNs token sealed under the relay's own key.
+It cannot open the push (only the phone holds that key); it learns what a
+push service learns (when, from which den's address, to which phone), and
+so does Apple.
+
+## Reports
+
+A member who reports a message sends the den its room, its id, its sender's
+device name, a reason and, only if they tick the box, its words. The den
+keeps them for the owner and those with Manage messages; a report's words are
+then readable by the den's operator too, as the reporter was told. Blocking
+is the device's own: the den is not told.
+
 ## Apps
 
 A host may turn on Cashboard (`DEN_CASHBOARD`), framed from

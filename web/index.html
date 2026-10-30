@@ -75,6 +75,7 @@
             <div class="link-acts"><button type="button" class="mini ghost" id="link-device">Link another device</button><button type="button" class="mini ghost" id="link-code">Enter a link code</button><button type="button" class="mini ghost" id="add-agent">Add an agent</button></div>
             <button type="button" class="mini ghost" id="save-passkey" hidden>Save pass to a passkey</button>
             <button type="button" class="mini ghost" id="forget">Forget this device</button>
+            <button type="button" class="mini ghost danger" id="delete-account">Delete account</button>
             <label>Notifications
               <select id="notify">
                 <option value="mentions">Mentions and private</option>
@@ -145,6 +146,7 @@
           <h2>—</h2>
           <p class="ask-text"></p>
           <label class="field ask-field"><span>Name</span><input name="value" maxlength="60" autocomplete="off" /></label>
+          <label class="check ask-check" hidden><input type="checkbox" name="check" /> <span></span></label>
           <div class="row"><button class="act ghost small" type="button" data-close>Cancel</button><button class="act small" type="submit" data-yes>OK</button></div>
         </form>
       </dialog>

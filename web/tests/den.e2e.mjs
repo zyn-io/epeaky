@@ -713,10 +713,48 @@ ok(await until(A.p, () => /ban/.test(document.querySelector('#audit-list')?.text
 await shot(A.p, 'settings');
 await A.p.click('#settings [data-close]');
 
-// A phone: the chat list first, a chat full screen with a way back (its own
-// button, and the phone's back), settings on their own tab.
+// Report and block: B reports A's message (with its words) to the den's
+// moderators, and no longer sees A's messages; the owner reads the report and
+// marks it done; B unblocks A from A's card.
+await A.p.evaluate(() => window.__den.say('general', 'Report check: rude words'));
+ok(await until(B.p, () => /Report check: rude words/.test(document.querySelector('#log')?.textContent || ''), null, 15000), 'B sees the message');
+await B.p.evaluate(() => [...document.querySelectorAll('#log li.msg')].find((li) => /Report check/.test(li.textContent)).querySelector('[data-act="report"]').click());
+await B.p.fill('#ask [name=value]', 'Insults');
+await B.p.check('#ask [name=check]');
+await B.p.click('#ask [data-yes]');
+ok(await until(B.p, () => /Reported/.test(document.querySelector('#den-status')?.textContent || '') && !/Report check: rude words/.test(document.querySelector('#log')?.textContent || '') && /Message from a member you blocked/.test(document.querySelector('#log')?.textContent || ''), null, 10000), "B's report is sent, and A's messages are hidden on B's device");
+await A.p.click('#den-settings');
+await A.p.click('[data-tab=reports]');
+ok(await until(A.p, () => /Insults/.test(document.querySelector('#report-list')?.textContent || '') && /Report check: rude words/.test(document.querySelector('#report-list')?.textContent || '') && /Matches the message on this device/.test(document.querySelector('#report-list')?.textContent || ''), null, 10000), "the owner reads the report, with the words B included, checked against the owner's own copy");
+// Words a reporter makes up are shown as not what the message says.
+const madeUp = await A.p.evaluate(async () => { const m = (await window.__den.log('general')).find((x) => /Report check/.test(x.text || '')); return { id: m.id, key: m.key }; });
+await B.p.evaluate(([m]) => window.__den.reportMessage('general', m, 'Made up', 'I never said this'), [madeUp]);
+await A.p.click('[data-tab=audit]');
+await A.p.click('[data-tab=reports]');
+ok(await until(A.p, () => /I never said this/.test(document.querySelector('#report-list')?.textContent || '') && /Not what the message says on this device/.test(document.querySelector('#report-list')?.textContent || ''), null, 10000), 'words a reporter made up are flagged against the real message');
+for (let i = 0; i < 2; i++) { await A.p.click('#report-list [data-done]'); await A.p.waitForTimeout(500); }
+ok(await until(A.p, () => !document.querySelector('#report-list [data-done]') && /done/.test(document.querySelector('#report-list')?.textContent || ''), null, 10000), 'and marks them done');
+await A.p.click('#settings [data-close]');
+if (await B.p.isHidden('#members')) await B.p.click('#room-meta');
+await B.p.click(`[data-member="${A.me.key}"]`);
+await B.p.click('#m-block');
+ok(await until(B.p, () => /Report check: rude words/.test(document.querySelector('#log')?.textContent || ''), null, 5000), "unblocked from A's card, A's messages show again");
+await B.p.click('#member [data-close]');
+
+// A phone, in Epeaky's iPhone app (its bridge stood in for): the chat list
+// first, a chat full screen with a way back (its own button, and the phone's
+// back), settings on their own tab, the app's push address, and deleting
+// the account.
 {
   const ctx = await b.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  const { publicKey } = (await import('node:crypto')).generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const p256dh = publicKey.export({ format: 'jwk' });
+  const raw = Buffer.concat([Buffer.from([4]), Buffer.from(p256dh.x, 'base64url'), Buffer.from(p256dh.y, 'base64url')]).toString('base64url');
+  const relay = `https://push.epeaky.zyn-network.com/w/e2e${Date.now()}`;
+  await ctx.addInitScript(([endpoint, key]) => {
+    window.__appCalls = [];
+    window.epeakyApp = { passkeys: false, call: async (t, a = {}) => { window.__appCalls.push({ t, ...a }); return t === 'push' ? { endpoint, p256dh: key, auth: 'AAECAwQFBgcICQoLDA0ODw' } : null; } };
+  }, [relay, raw]);
   const P = await ctx.newPage();
   P.on('pageerror', (e) => errs.push(`P: ${e.message.slice(0, 200)}`));
   P.on('console', (m) => { if (/Content Security Policy|Refused to/.test(m.text())) csp.push(`P: ${m.text().slice(0, 200)}`); });
@@ -725,7 +763,9 @@ await A.p.click('#settings [data-close]');
   ok(await P.isVisible('#chats') && await P.isHidden('#den-main') && await P.isVisible('#tabs'), 'a phone opens on the chat list, with its tabs');
   ok(await until(P, () => window.__den.inRoom('general'), null, 20000), 'P is in General');
   await A.p.evaluate(() => window.__den.say('general', 'Phone check: the call moves to 15:00'));
-  ok(await until(P, () => /Phone check: the call moves to 15:00/.test(document.querySelector('#chats [data-room="general"] .chat-last')?.textContent || '') && document.querySelector('#chats [data-room="general"] .badge') && !document.querySelector('#tabs-unread').hidden, null, 20000), "General's row shows the latest words, their sender, and an unread count; so does the Chats tab");
+  ok(await until(P, () => /Phone check: the call moves to 15:00/.test(document.querySelector('#chats [data-room="general"] .chat-last')?.textContent || '') && document.querySelector('#chats [data-room="general"] .badge') && !document.querySelector('#tabs-unread').hidden, null, 20000), `General's row shows the latest words, their sender, and an unread count; so does the Chats tab (${await P.evaluate(() => `${document.querySelector('#chats [data-room="general"]')?.textContent} / tab ${document.querySelector('#tabs-unread').hidden ? 'none' : document.querySelector('#tabs-unread').textContent}`)})`);
+  const reportsOfP = await P.evaluate(() => window.__den.reports().then(() => 'read', (e) => e.message));
+  ok(/permission/.test(reportsOfP), `a member without Manage messages reads no reports (${reportsOfP})`);
   ok(await P.evaluate(() => document.querySelector('#chats .chat')?.dataset.room) === 'general', 'the room with the latest message is first');
   await P.click('#chats [data-room="general"]');
   ok(await P.isVisible('#den-main') && await P.isHidden('#chats') && await P.isHidden('#tabs'), 'a chat takes the whole screen');
@@ -745,6 +785,19 @@ await A.p.click('#settings [data-close]');
   await P.click('#tabs [data-screen="me"]');
   ok(await P.isVisible('#forget') && await P.isVisible('#notify') && await P.isHidden('#chats'), 'settings are a tab of their own');
   await shot(P, 'phone');
+  // The app: its push address goes to the den, which takes Epeaky's relay; no passkeys where the app has none; Switch den.
+  ok(await until(P, () => window.__appCalls.some((c) => c.t === 'push' && c.key), null, 15000), "the page asks the app for its push address, with the den's push key");
+  ok(host(`import Ecto.Query; IO.puts(Den.Repo.exists?(from s in "push_subs", where: s.endpoint == ${JSON.stringify(relay)}))`) === 'true', "the den keeps the app's address at Epeaky's push relay");
+  ok(await P.isVisible('#switch-den') && await P.isHidden('#save-passkey') && /Epeaky’s push relay/.test(await P.textContent('.push-note')), 'in the app: Switch den, no passkey where the app has none, and the note names the relay');
+  // Delete account: the pass comes off the den's list, and the device is outside again.
+  const code = await P.evaluate(() => window.__den.keptPass());
+  const live = () => host(`{:ok, c} = Den.Gate.code(${JSON.stringify(code)}); IO.puts(elem(Den.Gate.Members.live?(c), 1))`);
+  ok(live() === 'true', 'before: its pass is a member');
+  await P.click('#delete-account');
+  ok(/Delete your account\?/.test(await P.textContent('#ask h2')), 'Delete account asks first');
+  await P.click('#ask [data-yes]');
+  ok(await until(P, () => !!document.querySelector('#den[hidden]') && !!document.querySelector('#way-invite, #enter'), null, 20000), 'after: the device is outside, at the door');
+  ok(live() === 'false', 'and its pass is no longer a member');
   await ctx.close();
 }
 

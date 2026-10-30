@@ -36,6 +36,7 @@ export function mountAdmin(den, el, ui) {
     ['channels', 'Channels', den.can('manage_channels')],
     ['moderation', 'Timeouts and bans', den.can('timeout') || den.can('kick') || den.can('ban')],
     ['invites', 'Invites', den.can('manage_invites')],
+    ['reports', 'Reports', den.can('manage_messages')],
     ['audit', 'Audit log', den.moderates()],
     ['owner', 'Ownership', den.isOwner()],
   ].filter((s) => s[2]);
@@ -52,7 +53,7 @@ export function mountAdmin(den, el, ui) {
   function draw() {
     el('set-tabs').innerHTML = sections().map(([id, label]) => `<button type="button" data-tab="${id}" aria-current="${id === section}">${label}</button>`).join('');
     el('set-tabs').querySelectorAll('[data-tab]').forEach((b) => { b.onclick = () => { section = b.dataset.tab; picked = null; draw(); }; });
-    ({ overview, roles, channels, moderation, invites, audit, owner })[section]();
+    ({ overview, roles, channels, moderation, invites, reports, audit, owner })[section]();
   }
 
   const body = () => el('set-body');
@@ -302,6 +303,35 @@ export function mountAdmin(den, el, ui) {
     } catch (e) { fail(e); }
   }
 
+  // ---- Reports --------------------------------------------------------------------
+
+  /// What members reported: open ones first. The reporter chose whether the
+  /// words came with it; acting on one is the moderation above.
+  async function reports() {
+    body().innerHTML = '<h3>Reports</h3><p class="set-note">Messages members reported, with their reason, and the words when the reporter included them. Open a member to act; mark a report done when it is dealt with.</p><ul class="rows reports" id="report-list"><li class="none">Loading…</li></ul><p class="out set-out" role="status"></p>';
+    try {
+      const list = await den.reports();
+      const where = (id) => esc(den.rooms.get(id)?.kind === 'private' ? 'a private room' : `# ${den.rooms.get(id)?.title || id}`);
+      // The words are the reporter's account: checked against this device's
+      // own copy of the message when it has one, from the sender's key.
+      const logs = {};
+      for (const r of list) if (!(r.room in logs)) logs[r.room] = await den.log(r.room).catch(() => []);
+      const check = (r) => {
+        const m = logs[r.room].find((x) => x.id === r.msg && x.key === r.sender);
+        const have = m && !m.deleted ? (m.text || m.file?.name || '') : null;
+        if (!r.words) return have === null ? '<small>Words not included, and the message is not on this device.</small>' : `<small>Words not included. On this device:</small><blockquote>${esc(have)}</blockquote>`;
+        if (have === null) return `<blockquote>${esc(r.words)}</blockquote><small>As the reporter gives them: the message is not on this device to check.</small>`;
+        return have === r.words ? `<blockquote>${esc(r.words)}</blockquote><small>Matches the message on this device.</small>` : `<blockquote>${esc(r.words)}</blockquote><small class="bad">Not what the message says on this device:</small><blockquote>${esc(have)}</blockquote>`;
+      };
+      el('report-list').innerHTML = list.map((r) => `<li class="${r.done_at ? 'done' : ''}"><small>${when(r.at)} · ${where(r.room)}${r.done_at ? ` · done ${when(r.done_at)}` : ''}</small>
+        <span>${mark(r.sender, 18)}<button type="button" class="linkish" data-open="${esc(r.sender)}">${whoHtml(r.sender)}</button></span>
+        <q>${esc(r.reason)}</q>${check(r)}
+        <small>Reported by ${whoHtml(r.reporter)}</small>${r.done_at ? '' : `<button type="button" class="mini" data-done="${esc(r.id)}">Done</button>`}</li>`).join('') || '<li class="none">No reports.</li>';
+      el('report-list').querySelectorAll('[data-open]').forEach((b) => { b.onclick = () => member(b.dataset.open); });
+      el('report-list').querySelectorAll('[data-done]').forEach((b) => { b.onclick = async () => { try { await den.reportDone(b.dataset.done); reports(); } catch (e) { fail(e); } }; });
+    } catch (e) { fail(e); }
+  }
+
   // ---- Ownership -----------------------------------------------------------------
 
   function owner() {
@@ -393,7 +423,7 @@ export function mountAdmin(den, el, ui) {
       ${s ? `<p class="sanction">${s.kind === 'ban' ? 'Banned' : s.kind === 'kick' ? `Kicked until ${when(s.until)}` : `Timed out until ${when(s.until)}`}</p>` : ''}
       ${manage && givable.length ? `<fieldset class="perms"><legend>Roles</legend>${givable.map((r) => `<label class="check"><input type="checkbox" data-give="${esc(r.id)}" ${roles.some((x) => x.id === r.id) ? 'checked' : ''} /> <i class="dot" data-c="${esc(r.colour || '')}"></i>${esc(r.name)}</label>`).join('')}</fieldset>` : ''}
       ${may('timeout') ? `<form class="set-form inline" id="to-form"><label class="field">Timeout<select name="s">${TIMEOUTS.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></label><label class="field grow">Reason<input name="reason" maxlength="300" placeholder="Optional; moderators see it" /></label><button class="act small" type="submit">Time out</button></form>${s?.kind === 'timeout' ? '<button type="button" class="mini" id="to-lift">Remove timeout</button>' : ''}` : ''}
-      <div class="row start">${may('kick') ? '<button type="button" class="mini danger" id="m-kick">Kick</button>' : ''}${may('ban') ? '<button type="button" class="mini danger" id="m-ban">Ban</button>' : ''}</div>
+      <div class="row start">${den.isMe(key) ? '' : `<button type="button" class="mini" id="m-block" aria-pressed="${ui.isBlocked(key)}">${ui.isBlocked(key) ? 'Unblock' : 'Block'}</button>`}${may('kick') ? '<button type="button" class="mini danger" id="m-kick">Kick</button>' : ''}${may('ban') ? '<button type="button" class="mini danger" id="m-ban">Ban</button>' : ''}</div>
       <p class="out set-out" role="status"></p>`;
     const out = (t, bad = false) => { const o = el('member-card').querySelector('.set-out'); o.textContent = t; o.classList.toggle('bad', bad); };
     const act = async (f, ok) => { try { await f(); out(ok); } catch (e) { out(e.message, true); } };
@@ -424,6 +454,16 @@ export function mountAdmin(den, el, ui) {
     const lift = el('to-lift');
     if (lift) lift.onclick = () => act(() => den.onPerson('untimeout', key), 'Timeout removed.');
     const reasoned = async (heading, text, yes) => ask({ heading, text, field: 'Reason (moderators see it)', yes, danger: true, empty: true });
+    const block = el('m-block');
+    if (block) {
+      block.onclick = () => {
+        const on = !ui.isBlocked(key);
+        ui.setBlocked(key, on);
+        block.textContent = on ? 'Unblock' : 'Block';
+        block.setAttribute('aria-pressed', String(on));
+        out(on ? 'Blocked: their messages are hidden on this device and do not notify.' : 'Unblocked.');
+      };
+    }
     const kick = el('m-kick');
     if (kick) kick.onclick = async () => { const r = await reasoned(`Kick ${display(key)}?`, 'They are taken out of every channel and can come back tomorrow.', 'Kick'); if (r !== null) act(() => den.onPerson('kick', key, { reason: r }), 'Kicked.'); };
     const ban = el('m-ban');

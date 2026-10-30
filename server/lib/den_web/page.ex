@@ -58,7 +58,32 @@ defmodule DenWeb.Page do
     |> halt()
   end
 
+  # Epeaky's iPhone app (DEN_APPLE_APP, "TEAMID.bundle.id"): this den's
+  # invite links open in the app, and its passkeys work there. Only links
+  # that carry an invite: any other visit stays in the browser.
+  def call(%Plug.Conn{path_info: [".well-known", "apple-app-site-association"], method: m} = conn, _) when m in ["GET", "HEAD"] do
+    case Application.get_env(:den, :apple_app) do
+      app when is_binary(app) ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> put_resp_header("cache-control", "public, max-age=3600")
+        |> send_resp(200, Jason.encode!(apple_app_site(app)))
+        |> halt()
+
+      _ ->
+        conn |> send_resp(404, "") |> halt()
+    end
+  end
+
   def call(conn, static), do: Plug.Static.call(secure(conn), static)
+
+  @doc "What Apple reads to tie the app to this den: invite links, and passkeys."
+  def apple_app_site(app) do
+    %{
+      "applinks" => %{"details" => [%{"appIDs" => [app], "components" => [%{"/" => "/", "#" => "invite=*", "comment" => "invite links"}]}]},
+      "webcredentials" => %{"apps" => [app]}
+    }
+  end
 
   @cashboard "https://cashboard.live"
 

@@ -15,6 +15,11 @@ defmodule Den.Push do
 
   The den learns a device's push address; the push service learns when a
   push reaches the device.
+
+  Epeaky's iPhone app gets no web push: its address is at Epeaky's push relay
+  (`push.epeaky.zyn-network.com`), which takes the same encrypted push and
+  hands it to Apple's APNs without opening it. A host lists the relays its
+  den sends to with `DEN_PUSH_RELAYS` (none: "").
   """
   import Ecto.Query
   alias Den.{Repo, Rooms}
@@ -115,7 +120,7 @@ defmodule Den.Push do
     with true <- String.printable?(ep) and not String.contains?(ep, ["\\", " ", "@"]),
          %{scheme: "https", host: host} = u when not is_map_key(u, :userinfo) and (not is_map_key(u, :port) or :erlang.map_get(:port, u) == 443) <- :uri_string.parse(ep),
          true <- Regex.match?(~r/\A[a-z0-9.-]+\z/, host),
-         true <- host in @hosts or Enum.any?(@suffixes, &String.ends_with?(host, &1)) do
+         true <- host in @hosts or host in relays() or Enum.any?(@suffixes, &String.ends_with?(host, &1)) do
       :ok
     else
       _ -> {:error, :push_service}
@@ -123,6 +128,9 @@ defmodule Den.Push do
   end
 
   def endpoint_ok(_), do: {:error, :push_service}
+
+  @doc "The push relays this den sends to, as well as the push services."
+  def relays, do: Application.get_env(:den, :push_relays, ["push.epeaky.zyn-network.com"])
 
   # ---- Sending --------------------------------------------------------------------------
 

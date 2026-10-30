@@ -1078,7 +1078,9 @@ export class DenClient {
           if (words) this.said[room] = Date.now();
           await this.advance(room, r.seq);
           await this.apply(room, { ...m, from: this.me.name, key: this.me.key, seq: r.seq, srv: r.at }, true);
-          this.markRead(room);
+          // Writing in a room reads it; what a device sends by itself (its
+          // profile, pins, a reaction) does not.
+          if (words) this.markRead(room);
           await this.save();
           return m.id;
         } catch (e) {
@@ -1126,6 +1128,28 @@ export class DenClient {
   async pushKey() { return (await this.push(this.lobby, 'push_key', {})).key; }
   pushSub(sub) { return this.push(this.lobby, 'push_sub', sub); }
   pushOff(endpoint) { return this.push(this.lobby, 'push_off', { endpoint }); }
+
+  /// A message reported to the den's moderators: its room, id and sender, a
+  /// reason, and its words only if the reporter includes them.
+  reportMessage(room, m, reason, words = null) {
+    return this.push(this.lobby, 'report_message', { room, msg: m.id, sender: m.key, reason, ...(words ? { words: String(words).slice(0, 4000) } : {}) });
+  }
+  /// For the owner and Manage messages: the reports, open ones first.
+  async reports() { return (await this.push(this.lobby, 'reports', {})).reports; }
+  reportDone(id) { return this.push(this.lobby, 'report_done', { id }); }
+
+  /// Deletes this member's account: its pass comes off the den's member list
+  /// (when this device keeps it; a den whose passes the host's own site
+  /// issues removes them there), the device leaves the den, and everything
+  /// it keeps here is wiped.
+  async deleteAccount() {
+    const code = await this.kv.get('pass');
+    if (code) {
+      try { await this.post('/door/leave', { code }); } catch (e) { if (e.status !== 404 && e.status !== 403) throw e; }
+    }
+    await this.push(this.lobby, 'leave_den', {}).catch(() => {});
+    await this.forget();
+  }
   edit(room, to, text) { return this.send(room, { t: 'edit', to, text: String(text).slice(0, 4000) }); }
   remove(room, to) { return this.send(room, { t: 'del', to }); }
 

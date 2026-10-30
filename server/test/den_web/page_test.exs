@@ -37,6 +37,16 @@ defmodule DenWeb.PageTest do
     assert get_resp_header(door, "content-security-policy") == []
   end
 
+  test "for Epeaky's iPhone app, only when the host names it: invite links open the app, passkeys work there", %{conn: conn} do
+    assert conn |> get("/.well-known/apple-app-site-association") |> response(404)
+    Application.put_env(:den, :apple_app, "ABCDE12345.io.infinityteam.epeaky")
+    j = build_conn() |> get("/.well-known/apple-app-site-association") |> json_response(200)
+    assert j["webcredentials"]["apps"] == ["ABCDE12345.io.infinityteam.epeaky"]
+    assert [%{"appIDs" => ["ABCDE12345.io.infinityteam.epeaky"], "components" => [%{"/" => "/", "#" => "invite=*"}]}] = j["applinks"]["details"]
+  after
+    Application.delete_env(:den, :apple_app)
+  end
+
   test "config.json names the donation page the host set, and only then", %{conn: conn} do
     plain = Jason.decode!(get(conn, "/config.json").resp_body)
     refute Map.has_key?(plain, "donate")

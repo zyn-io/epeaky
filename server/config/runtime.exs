@@ -83,6 +83,23 @@ if v = System.get_env("DEN_CASHBOARD") do
   config :den, cashboard: codes
 end
 
+# Push relays this den sends to besides the browsers' push services, comma
+# separated (Den.Push.relays/0): Epeaky's own by default, for its iPhone app;
+# "" for none.
+if v = System.get_env("DEN_PUSH_RELAYS") do
+  hosts = v |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+  Enum.all?(hosts, &Regex.match?(~r/\A[a-z0-9.-]+\z/, &1)) || raise "DEN_PUSH_RELAYS must be host names, comma separated"
+  config :den, push_relays: hosts
+end
+
+# Epeaky's iPhone app, as "TEAMID.io.infinityteam.epeaky": the den serves
+# /.well-known/apple-app-site-association so its invite links open the app
+# and its passkeys work there (the app must list this den's host too).
+if v = System.get_env("DEN_APPLE_APP") do
+  Regex.match?(~r/\A[A-Z0-9]{10}\.[A-Za-z0-9.-]+\z/, v) || raise "DEN_APPLE_APP must be TEAMID.bundle.id"
+  config :den, apple_app: v
+end
+
 # Screen sharing in voice (Den.Voice.screen?/0, screen_bitrate/0).
 case System.get_env("DEN_SCREEN") do
   nil -> :ok

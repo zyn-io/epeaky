@@ -43,7 +43,10 @@ you trust it with anything that matters.
 - **Moderation**, the way Discord does it: an owner with every power, roles
   with permissions the owner gives out, slow mode and posting rights per
   channel, timeouts, kicks, bans, deleting anyone's message, and an audit
-  log. The den enforces all of it without reading a word.
+  log. The den enforces all of it without reading a word. Members **report**
+  a message to the moderators (its words go with it only if they say so) and
+  **block** a member on their own device; **Delete account** takes a member's
+  pass off the den's list and their device out of it.
 - **Installable**: the page installs to a phone's home screen or as a desktop
   app, and wakes with a notification when its page is closed: a push that
   names the room, never the words. On a phone it works as chat apps do: the
@@ -211,6 +214,8 @@ count the whole den as one client.
 | `DEN_ASK_PER_HOUR` | requests to join per address an hour (default 5) |
 | `DEN_VOICE_PUBLIC_ONLY` | `1`: voice offers devices only public addresses |
 | `DEN_SCREEN` | `off`: no screen sharing in voice (default `on`) |
+| `DEN_APPLE_APP` | Epeaky's iPhone app as `TEAMID.io.infinityteam.epeaky`: the den serves `/.well-known/apple-app-site-association`, so its invite links open the app and its passkeys work there (only for a den the app lists) |
+| `DEN_PUSH_RELAYS` | push relays the den sends to besides the browsers' push services, comma separated (default `push.epeaky.zyn-network.com`, for Epeaky's iPhone app; `""` for none) |
 | `DEN_SCREEN_BITRATE` | bits a second one shared screen may use, 300000 to 8000000 (default 2500000); the den sends it to every viewer, so 2.5 Mbps to 49 viewers is about 120 Mbps up |
 | `POOL_SIZE` | database connections |
 

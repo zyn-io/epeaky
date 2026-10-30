@@ -1,0 +1,11 @@
+{
+  "name": "epeaky-push",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Epeaky's push relay: web push from dens to Apple's APNs, for Epeaky's iPhone app",
+  "license": "(MIT OR Apache-2.0)",
+  "engines": { "node": ">=22" },
+  "bin": { "epeaky-push": "bin/epeaky-push.mjs" },
+  "scripts": { "start": "node bin/epeaky-push.mjs", "test": "node --test tests/*.test.mjs" }
+}

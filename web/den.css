@@ -501,3 +501,14 @@ kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--line); 
 .den-app { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .den-app iframe { flex: 1; width: 100%; min-height: 0; border: 0; background: #fff; }
 .app-intro { display: grid; gap: 18px; justify-items: start; padding: 28px 24px; }
+
+/* Reports (Den settings), blocked members, and the report box. */
+.reports li { display: grid; gap: 4px; padding: 10px 4px; border-bottom: 1px solid var(--line); }
+.reports li.done { opacity: 0.6; }
+.reports li > span { display: flex; align-items: center; gap: 8px; }
+.reports li .mini { justify-self: start; margin-left: 0; }
+.reports q { color: var(--ink); }
+.reports blockquote { margin: 0; padding: 6px 10px; border-left: 2px solid var(--line); color: var(--read); white-space: pre-wrap; overflow-wrap: anywhere; }
+.linkish { padding: 0; font: inherit; color: inherit; background: none; border: 0; cursor: pointer; text-align: left; }
+.log .note.blocked { font-style: italic; }
+.ask-check { display: flex; gap: 8px; align-items: flex-start; margin: 4px 0 8px; font: 13.5px/1.4 var(--sans); color: var(--read); }

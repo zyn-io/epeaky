@@ -96,3 +96,13 @@ jobs:
         with:
           node-version: 24
       - run: (cd agents/mcp && node --test tests/*.test.mjs) && (cd agents/librarian && node --test tests/*.test.mjs) && (cd agents/host-mcp && node --test tests/*.test.mjs)
+  # The push relay for the iPhone app (push/): no dependencies, no build.
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test tests/*.test.mjs
+        working-directory: push

@@ -1,0 +1,109 @@
+# Epeaky for iPhone. `xcodegen` makes Epeaky.xcodeproj from this (not committed).
+name: Epeaky
+options:
+  bundleIdPrefix: io.infinityteam
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # The Apple Developer team id, at release (RELEASE.md).
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.10"
+    TARGETED_DEVICE_FAMILY: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+targets:
+  Epeaky:
+    type: application
+    platform: iOS
+    sources:
+      - Epeaky
+      - Shared
+    info:
+      path: Epeaky/Info.plist
+      properties:
+        CFBundleDisplayName: Epeaky
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen:
+          UIColorName: Background
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIUserInterfaceStyle: Dark
+        NSMicrophoneUsageDescription: Epeaky uses the microphone when you join voice in a room.
+        NSPhotoLibraryUsageDescription: Epeaky opens your photo library when you choose a photo to send.
+        NSCameraUsageDescription: Epeaky uses the camera when you take a photo to send.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        CFBundleURLTypes:
+          - CFBundleURLName: io.infinityteam.epeaky
+            CFBundleURLSchemes: [epeaky]
+    entitlements:
+      path: Epeaky/Epeaky.entitlements
+      properties:
+        aps-environment: development
+        com.apple.developer.associated-domains:
+          - applinks:gen-epeaky.zyn-network.com
+          - webcredentials:gen-epeaky.zyn-network.com
+        com.apple.security.application-groups: [group.io.infinityteam.epeaky]
+        keychain-access-groups: [$(AppIdentifierPrefix)io.infinityteam.epeaky.shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.infinityteam.epeaky
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.social-networking
+    dependencies:
+      - target: NotificationService
+  NotificationService:
+    type: app-extension
+    platform: iOS
+    sources:
+      - NotificationService
+      - Shared
+    info:
+      path: NotificationService/Info.plist
+      properties:
+        CFBundleDisplayName: Epeaky
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    entitlements:
+      path: NotificationService/NotificationService.entitlements
+      properties:
+        com.apple.security.application-groups: [group.io.infinityteam.epeaky]
+        keychain-access-groups: [$(AppIdentifierPrefix)io.infinityteam.epeaky.shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.infinityteam.epeaky.notifications
+  EpeakyTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [EpeakyTests]
+    dependencies:
+      - target: Epeaky
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: io.infinityteam.epeaky.tests
+  EpeakyUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [EpeakyUITests]
+    dependencies:
+      - target: Epeaky
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: io.infinityteam.epeaky.uitests
+        TEST_TARGET_NAME: Epeaky
+schemes:
+  Epeaky:
+    build:
+      targets:
+        Epeaky: all
+    test:
+      targets: [EpeakyTests, EpeakyUITests]
