@@ -31,7 +31,6 @@
 /* The den: rooms | conversation | members, the height of the window. */
 .den { display: grid; grid-template-columns: 256px minmax(0, 1fr); position: relative; overflow: hidden; min-height: 480px; border: 1px solid var(--line); box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.5); background: linear-gradient(160deg, rgba(16, 21, 19, 0.93), rgba(8, 10, 9, 0.96)); backdrop-filter: blur(3px); }
 .den :focus-visible { outline: 2px solid var(--zec); outline-offset: -2px; }
-.den-scrim { display: none; }
 .mark { display: block; flex: none; image-rendering: pixelated; }
 .tag-cap { font: 8px var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); }
 
@@ -252,25 +251,108 @@ kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--line); 
 .lb-bar div { display: flex; gap: 6px; }
 
 @media (max-width: 1100px) { .den { grid-template-columns: 220px minmax(0, 1fr); } .members { width: 220px; } }
+/* The phone's parts, shown only there. */
+.chats, .tabs, .me-title, .new-chat, .head-more, .room-sub, .send svg { display: none; }
+.head-end { margin-left: auto; display: flex; gap: 8px; align-items: center; flex: none; }
+.head-end .head-acts { margin-left: 0; }
+.room-id { display: flex; align-items: center; gap: 10px; min-width: 0; }
+
+/* A phone: one screen at a time, as in other chat apps: the chat list, a
+   chat, or settings; full screen, clear of the notch and the home bar. */
 @media (max-width: 760px) {
-  .register.wide { padding: 8px; }
-  .den { grid-template-columns: minmax(0, 1fr); box-shadow: none; }
-  .den-side { position: absolute; inset: 0 auto 0 0; z-index: 6; width: min(300px, 86%); background: #0a0c0a; transform: translateX(-102%); transition: transform 0.2s ease; visibility: hidden; }
-  .den.drawer .den-side { transform: none; visibility: visible; box-shadow: 6px 0 0 rgba(0, 0, 0, 0.45); }
-  .den.drawer .den-scrim { display: block; position: absolute; inset: 0; z-index: 5; background: rgba(0, 0, 0, 0.6); }
-  .rooms-open { display: grid; }
-  .room-head { padding: 8px 10px; gap: 8px; }
-  .room-head h2 { font-size: 15px; }
-  .pill { padding: 6px 8px; }
+  .register.wide { padding: 0; }
+  .den { grid-template-columns: minmax(0, 1fr); min-height: 0; border: 0; box-shadow: none; background: var(--black); backdrop-filter: none; }
+  .den.screen-chat .den-side, .den:not(.screen-chat) .den-main, .den:not(.screen-chat) .den-app, .rooms { display: none; }
+  .den-side { border-right: 0; background: var(--black); padding-top: env(safe-area-inset-top); }
+
+  .den.screen-list .side-head, .den.screen-list .side-foot, .den.screen-me .den-head, .den.screen-me .side-search, .den.screen-me .found, .den.screen-me .chats { display: none; }
+  .den .den-head { padding: 10px 8px 8px 16px; border-bottom: 0; }
+  .den .den-head b { font-size: 22px; }
+  .new-chat { display: grid; place-items: center; width: 40px; height: 40px; color: var(--ink); background: none; border: 0; cursor: pointer; }
+  .new-chat svg { width: 20px; height: 20px; }
+  .side-search { padding: 0 16px 8px; }
+  #search { font-size: 16px; padding: 9px 12px; border-radius: 10px; }
+  .den.screen-list .chats { display: block; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 8px; }
+  .chat { display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px 16px 0; text-align: left; color: var(--ink); background: none; border: 0; cursor: pointer; font: inherit; }
+  .chat:active { background: rgba(240, 238, 230, 0.05); }
+  .chat > .mark, .chat-pic { width: 48px; height: 48px; flex: none; margin-bottom: 8px; border-radius: 50%; overflow: hidden; }
+  .chat-pic { display: grid; place-items: center; background: rgba(159, 212, 255, 0.12); color: var(--acid); font: 600 19px var(--sans); text-transform: uppercase; }
+  .chat-main { flex: 1; min-width: 0; display: grid; gap: 1px; padding-bottom: 9px; border-bottom: 1px solid var(--line); }
+  .chat-top, .chat-bottom { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .chat-name { flex: 1; min-width: 0; font: 600 16px var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chat time { flex: none; font: 12px var(--sans); color: var(--muted); }
+  .chat.unread time { color: var(--acid); }
+  .chat-last { flex: 1; min-width: 0; font: 14px/1.35 var(--sans); color: var(--read-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chat.unread .chat-last { color: var(--read); }
+  .chat-muted { flex: none; font: 11px var(--sans); color: var(--muted); }
+  .chat .badge, .tabs .badge { min-width: 20px; border-radius: 10px; font-size: 11.5px; line-height: 20px; }
+  .chats .invite { display: flex; align-items: center; gap: 8px; padding: 10px 16px; font: 14px var(--sans); color: var(--ink); background: rgba(159, 212, 255, 0.06); }
+  .chats .invite span { flex: 1; }
+  .chat-new { display: block; margin: 14px 16px 4px; padding: 9px 14px; font-size: 14px; }
+
+  .den:not(.screen-chat) .tabs { display: flex; border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); background: #0a0c0a; }
+  .tabs button { position: relative; flex: 1; display: grid; justify-items: center; gap: 1px; padding: 7px 0 5px; font: 11px var(--sans); color: var(--muted); background: none; border: 0; cursor: pointer; }
+  .tabs button[aria-current] { color: var(--acid); }
+  .tabs svg { width: 24px; height: 24px; }
+  .tabs .badge { position: absolute; top: 3px; left: calc(50% + 6px); }
+
+  .den.screen-me .me-title { display: block; margin: 0; padding: 14px 16px 6px; font: 600 22px var(--sans); }
+  .den.screen-me .side-head { padding: 10px 16px 16px; }
+  .den.screen-me .side-foot { flex: 1; min-height: 0; overflow-y: auto; border-top: 0; padding: 16px; display: grid; align-content: start; gap: 14px; }
+  .den.screen-me .side-foot .mini { padding: 10px 14px; font-size: 14px; }
+  .den.screen-me .link-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .den.screen-me .side-foot > .mini { margin: 0; justify-self: start; }
+  .den.screen-me .side-foot select { font-size: 16px; padding: 10px; }
+
+  .room-head { position: relative; min-height: 52px; padding: calc(4px + env(safe-area-inset-top)) 6px 4px; gap: 4px; }
+  .rooms-open { display: grid; width: 40px; height: 40px; margin: 0; border: 0; color: var(--acid); }
+  .rooms-open svg { width: 22px; height: 22px; }
+  .room-id { flex: 1; display: grid; gap: 0; cursor: pointer; }
+  .room-head h2, .room-head h2.plain { font: 600 16px/1.25 var(--sans); letter-spacing: 0; }
+  .room-sub { display: block; font: 12px/1.3 var(--sans); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .room-kind, .room-topic, .room-slow { display: none; }
+  .head-end { gap: 2px; }
+  .pill.go { border: 0; padding: 10px; }
+  .pill.go svg { width: 20px; height: 20px; }
   .pill .l { display: none; }
-  .members { position: absolute; inset: 0 0 0 auto; z-index: 6; width: min(280px, 86%); background: #0a0c0a; box-shadow: -6px 0 0 rgba(0, 0, 0, 0.45); }
-  .msg { grid-template-columns: 36px minmax(0, 1fr); column-gap: 8px; padding-left: 4px; padding-right: 10px; }
-  .msg > .mark { margin-left: 6px; width: 24px; height: 24px; }
-  .tools { right: 8px; }
+  .head-more { display: grid; place-items: center; width: 40px; height: 40px; color: var(--read); background: none; border: 0; cursor: pointer; }
+  .head-more svg { width: 18px; height: 18px; }
+  .head-acts { display: none; position: absolute; top: calc(100% + 2px); right: 8px; z-index: 8; flex-direction: column; align-items: stretch; gap: 0; min-width: 200px; background: #0d100e; border: 1px solid var(--line); box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.55); }
+  .head-acts.open { display: flex; }
+  .head-acts .pill { justify-content: flex-start; padding: 12px 16px; border: 0; font-size: 15px; }
+  .members { position: absolute; inset: 0; z-index: 6; width: auto; padding-top: env(safe-area-inset-top); background: var(--black); }
+
+  .log { padding: 6px 0 10px; }
+  .msg { grid-template-columns: 30px minmax(0, 1fr); column-gap: 6px; padding: 2px 10px 2px 8px; }
+  .msg:not(.cont) { padding-top: 8px; }
+  .msg:hover, .msg:focus-within, .msg.touch, .msg.ping { background: none; box-shadow: none; }
+  .msg > .mark { width: 28px; height: 28px; margin: 2px 0 0; border-radius: 50%; }
+  .msg .side-time { display: none; }
+  .msg-main { grid-column: 2; display: flex; flex-direction: column; justify-self: start; max-width: 86%; padding: 6px 11px 7px; border-radius: 4px 16px 16px 16px; background: rgba(240, 238, 230, 0.07); }
+  .msg.cont .msg-main { border-radius: 16px; }
+  .msg.ping .msg-main { box-shadow: inset 2px 0 0 var(--acid); }
+  .msg.touch .msg-main { outline: 1px solid var(--line); }
+  .msg.gone .msg-main { background: none; border: 1px dashed var(--line); }
+  .msg.mine { grid-template-columns: minmax(0, 1fr); padding-left: 48px; }
+  .msg.mine > .mark { display: none; }
+  .msg.mine .msg-main { grid-column: 1; justify-self: end; border-radius: 16px 4px 16px 16px; background: rgba(159, 212, 255, 0.17); }
+  .msg.mine.cont .msg-main { border-radius: 16px; }
+  .msg.mine .msg-head .who, .msg.mine .msg-head .id, .msg.mine .msg-head .you, .msg.mine .msg-head .tag-agent { display: none; }
+  .msg.mine .msg-head { order: 9; justify-content: flex-end; margin: 0; }
+  .msg.mine .msg-head time { font-size: 10.5px; }
+  .msg-head { gap: 6px; }
+  .tools { top: auto; bottom: calc(100% - 4px); right: 10px; }
+  .msg:first-child .tools { top: auto; }
+
   .voice { padding: 8px 10px; }
   #stage-video { max-height: 40vh; }
-  .compose { padding: 0 8px 8px; }
+  .compose { padding: 0 8px calc(8px + env(safe-area-inset-bottom)); }
   .mentions { left: 8px; }
+  .say-form { align-items: flex-end; border-radius: 22px; padding-left: 4px; }
+  .say-form textarea { font-size: 16px; padding: 10px 4px; }
+  .send { display: grid; place-items: center; width: 36px; height: 36px; margin: 4px; padding: 0; border-radius: 50%; }
+  .send svg { display: block; width: 18px; height: 18px; }
+  .send .l { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .live-dot, .dots i, .msg.flash { animation: none; } .den-side { transition: none; } }
 .ask-form { display: grid; gap: 10px; max-width: 60ch; }

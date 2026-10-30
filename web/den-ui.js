@@ -24,6 +24,17 @@ function dayName(t) {
   return d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short', ...(d.getFullYear() !== today.getFullYear() ? { year: 'numeric' } : {}) });
 }
 
+/// When a chat's latest message came, as a chat list says it: the time today,
+/// then the day's name for a week, then the date.
+function when(t) {
+  const d = new Date(t);
+  const today = new Date();
+  if (d.toDateString() === today.toDateString()) return time(t);
+  if (d.toDateString() === new Date(Date.now() - 86_400_000).toDateString()) return 'Yesterday';
+  if (Date.now() - t < 6 * 86_400_000) return d.toLocaleDateString([], { weekday: 'short' });
+  return d.toLocaleDateString([], { day: 'numeric', month: 'short', ...(d.getFullYear() !== today.getFullYear() ? { year: '2-digit' } : {}) });
+}
+
 // A device's mark: a 5×5 mirrored pixel pattern from its key, so the same
 // device looks the same to everyone, without a name or picture to go on.
 const INKS = ['#c7f04b', '#f4b728', '#7fd1b9', '#e58a6b', '#b9a7e8', '#e9e6dc'];
@@ -76,6 +87,11 @@ const ICON = {
 /// `apps.cashboard`: the host's Cashboard settings ({ codes }), when it turned Cashboard on.
 export function mountDen(den, el, me, apps = {}) {
   let room = 'general';
+  // On a phone, one screen at a time: the chat list, a chat, or settings.
+  const phone = matchMedia('(max-width: 760px)');
+  let screen = 'list';
+  /// Whether the open room is in front of its reader: on a phone, only in a chat.
+  const looking = () => !phone.matches || screen === 'chat';
   // Cashboard: whether it is on screen, its connection once framed, and boards waiting for it.
   let appOpen = false;
   let cashboard = null;
@@ -163,10 +179,12 @@ export function mountDen(den, el, me, apps = {}) {
   const box = el('den');
   const fit = () => {
     const top = box.getBoundingClientRect().top + window.scrollY;
-    box.style.height = `${Math.max(480, window.innerHeight - top - 16)}px`;
+    // A phone: the whole screen above the keyboard (only the visual viewport shrinks for it).
+    box.style.height = phone.matches ? `${(window.visualViewport?.height || window.innerHeight) - top}px` : `${Math.max(480, window.innerHeight - top - 16)}px`;
   };
   fit();
   window.addEventListener('resize', fit);
+  window.visualViewport?.addEventListener('resize', fit);
 
   // ---- The room list --------------------------------------------------------
 
@@ -180,6 +198,7 @@ export function mountDen(den, el, me, apps = {}) {
         ${invites.map((i) => `<div class="invite"><span>A private room</span><button type="button" class="mini" data-join="${esc(i.id)}">Join</button><button type="button" class="mini ghost" data-decline="${esc(i.id)}">Decline</button></div>`).join('')}
       </div>`);
     }
+    const glances = new Map(await Promise.all(rooms().map(async (r) => [r.id, await den.glance(r.id)])));
     for (const [kind, label, add] of groups) {
       const list = rooms().filter((r) => r.kind === kind);
       if (!list.length && kind === 'proposal') continue;
@@ -188,7 +207,7 @@ export function mountDen(den, el, me, apps = {}) {
       const items = [];
       let unreadHere = 0;
       for (const r of list) {
-        const n = await den.unread(r.id);
+        const n = glances.get(r.id)?.unread || 0;
         unreadHere += n;
         const voiceHere = den.voice?.room === r.id;
         items.push(`<button type="button" class="room${n ? ' unread' : ''}" data-room="${esc(r.id)}" aria-current="${r.id === room}">${kind === 'open' ? '<span class="hash" aria-hidden="true">#</span>' : ''}<span class="room-name">${esc(title(r))}</span>${voiceHere ? '<span class="live-dot" title="You are in voice here"></span>' : ''}${n ? `<span class="badge" aria-label="${n} unread">${n > 99 ? '99+' : n}</span>` : ''}</button>`);
@@ -211,7 +230,38 @@ export function mountDen(den, el, me, apps = {}) {
     el('rooms').querySelectorAll('[data-new]').forEach((b) => { b.onclick = () => (b.dataset.new === 'open' ? newRoom() : pickMembers('New private room', 'Make room', true, (keys, name) => den.startPrivate(keys, name).then(go))); });
     const t = el('rooms').querySelector('[data-toggle]');
     if (t) t.onclick = () => { propsOpen = !propsOpen; try { localStorage.setItem('den.props', propsOpen ? 'open' : 'closed'); } catch { /* not kept */ } drawRooms(); };
+    drawChats(invites, glances);
     drawHead();
+  }
+
+  /// The chat list, a phone's first screen: invitations, then every room by
+  /// its latest message, each with who said what and how many are unread.
+  function drawChats(invites, glances) {
+    const at = (r) => glances.get(r.id)?.last?.at || 0;
+    const row = (r) => {
+      const { unread = 0, last: m = null } = glances.get(r.id) || {};
+      const others = r.kind === 'private' && den.inRoom(r.id) ? den.members(r.id).filter((x) => !den.isMe(x.key)) : [];
+      // A private room of two is named after the other person: their words need no name.
+      const pair = others.length > 0 && title(r) === display(others[0].key);
+      const who = !m ? '' : den.isMe(m.key) ? 'You: ' : pair ? '' : `${display(m.key)}: `;
+      const what = !m ? (r.kind === 'private' && !den.inRoom(r.id) ? 'Waiting for the invitation to arrive.' : 'No messages yet.') : m.deleted ? 'Message deleted' : m.file ? m.file.name : m.text || '';
+      const pic = pair ? mark(others[0].key, 48) : `<span class="chat-pic" aria-hidden="true">${r.kind === 'open' ? '#' : esc(plain(title(r)).slice(0, 1))}</span>`;
+      return `<button type="button" class="chat${unread ? ' unread' : ''}" data-room="${esc(r.id)}">${pic}<span class="chat-main"><span class="chat-top"><b class="chat-name">${esc(title(r))}</b>${m ? `<time datetime="${new Date(m.at).toISOString()}">${esc(when(m.at))}</time>` : ''}</span><span class="chat-bottom"><span class="chat-last">${esc(plain(`${who}${what}`).slice(0, 140))}</span>${muted.has(r.id) ? '<span class="chat-muted">Muted</span>' : ''}${unread ? `<span class="badge" aria-label="${unread} unread">${unread > 99 ? '99+' : unread}</span>` : ''}</span></span></button>`;
+    };
+    const mayOpen = !den.mod.owner || den.can('manage_channels');
+    el('chats').innerHTML = `${invites.map((i) => `<div class="invite"><span>Invitation to a private room</span><button type="button" class="mini" data-join="${esc(i.id)}">Join</button><button type="button" class="mini ghost" data-decline="${esc(i.id)}">Decline</button></div>`).join('')}
+      ${rooms().sort((x, y) => at(y) - at(x)).map(row).join('')}
+      ${apps.cashboard ? '<button type="button" class="chat" data-app="cashboard"><span class="chat-pic" aria-hidden="true">C</span><span class="chat-main"><span class="chat-top"><b class="chat-name">Cashboard</b></span><span class="chat-bottom"><span class="chat-last">App · cashboard.live</span></span></span></button>' : ''}
+      ${mayOpen ? '<button type="button" class="mini ghost chat-new" data-new="open">New room</button>' : ''}`;
+    const c = el('chats');
+    c.querySelectorAll('[data-room]').forEach((b) => { b.onclick = () => go(b.dataset.room); });
+    c.querySelector('[data-app]')?.addEventListener('click', () => openApp());
+    c.querySelectorAll('[data-join]').forEach((b) => { b.onclick = async () => { b.disabled = true; const r = await den.joinInvite(b.dataset.join); drawRooms(); if (r) go(r); }; });
+    c.querySelectorAll('[data-decline]').forEach((b) => { b.onclick = async () => { await den.declineInvite(b.dataset.decline); drawRooms(); }; });
+    const n = [...glances.values()].reduce((a, g) => a + g.unread, 0);
+    el('tabs-unread').hidden = !n;
+    el('tabs-unread').textContent = n > 99 ? '99+' : String(n);
+    c.querySelector('[data-new]')?.addEventListener('click', () => newRoom());
   }
 
   function drawHead() {
@@ -219,6 +269,7 @@ export function mountDen(den, el, me, apps = {}) {
     el('room-title').textContent = title(r) || room;
     el('room-title').classList.toggle('plain', r?.kind === 'private');
     el('room-kind').textContent = r?.kind === 'private' ? 'Private' : r?.kind === 'proposal' ? 'Proposal' : '';
+    el('room-sub').textContent = [el('room-kind').textContent, counts[room] ? `${counts[room]} members` : ''].filter(Boolean).join(' · ');
     el('room-meta').textContent = counts[room] ? `Members · ${counts[room]}` : 'Members';
     drawPinCount();
     el('room-topic').textContent = r?.kind === 'open' ? plain(r.topic || '') : '';
@@ -257,7 +308,7 @@ export function mountDen(den, el, me, apps = {}) {
     reply = null;
     editing = null;
     el('say-text').value = '';
-    el('den').classList.remove('drawer');
+    show('chat', true);
     closeMentions();
     drawRooms();
     drawLog(focus);
@@ -454,7 +505,7 @@ export function mountDen(den, el, me, apps = {}) {
     const earlier = el('earlier');
     if (earlier) earlier.onclick = () => { drawn += 300; const first = log[from]?.id; drawLog(first); };
     if (focus) flash(focus); else toBottom();
-    den.markRead(room);
+    if (looking()) den.markRead(room);
     drawRooms();
   }
 
@@ -482,7 +533,7 @@ export function mountDen(den, el, me, apps = {}) {
     shown.push(...log);
     if (stay) toBottom();
     else if (d.kind === 'msg' || d.kind === 'file') el('jump').hidden = false;
-    if (!document.hidden && stay) den.markRead(room);
+    if (!document.hidden && stay && looking()) den.markRead(room);
   }
 
   function flash(id) {
@@ -651,7 +702,9 @@ export function mountDen(den, el, me, apps = {}) {
     const blocked = s ? (s.kind === 'timeout' ? `You are timed out until ${time(s.until * 1000)}. You can read, but not write, react or talk.` : 'This device was removed from the den by its moderators.')
       : !den.mayPost(room) ? 'You do not have permission to send messages in this channel.' : '';
     el('say').hidden = (!den.inRoom(room) && r?.kind === 'private') || !!blocked;
-    el('say').querySelector('[type=submit]').textContent = editing ? 'Save' : 'Send';
+    const send = el('say').querySelector('[type=submit]');
+    send.querySelector('.l').textContent = editing ? 'Save' : 'Send';
+    send.setAttribute('aria-label', editing ? 'Save' : 'Send');
     drawSlow(blocked);
     drawHead();
   }
@@ -903,9 +956,47 @@ export function mountDen(den, el, me, apps = {}) {
     el('members').querySelectorAll('[data-unpin]').forEach((b) => { b.onclick = () => den.unpin(room, b.dataset.unpin, b.dataset.by).then(() => status('Unpinned.'), (e) => status(e.message)); });
   }
 
-  // The room list as a drawer, on a phone.
-  el('rooms-open').onclick = () => el('den').classList.toggle('drawer');
-  el('den-scrim').onclick = () => el('den').classList.remove('drawer');
+  // ---- A phone: the chat list, a chat, or settings ---------------------------
+
+  /// Puts one screen in front. A chat opened from the list goes into the
+  /// browser's history, so the phone's own back (and a swipe) returns to the list.
+  function show(s, quiet = false) {
+    if (s === 'chat' && screen !== 'chat' && phone.matches && history.state?.den !== 'chat') history.pushState({ den: 'chat' }, '');
+    screen = s;
+    for (const x of ['list', 'chat', 'me']) el('den').classList.toggle(`screen-${x}`, s === x);
+    el('tabs').querySelectorAll('[data-screen]').forEach((b) => (b.dataset.screen === s ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current')));
+    closeMore();
+    if (s === 'chat' && !quiet && !appOpen && nearBottom()) { den.markRead(room); drawRooms(); }
+  }
+  function back() {
+    if (history.state?.den === 'chat') history.back();
+    else show('list');
+  }
+  // A page reloaded in a chat starts at the list, with nothing to go back to.
+  if (history.state?.den === 'chat') history.replaceState(null, '');
+  window.addEventListener('popstate', () => { if (screen === 'chat') show('list'); });
+  el('rooms-open').onclick = back;
+  el('tabs').querySelectorAll('[data-screen]').forEach((b) => { b.onclick = () => show(b.dataset.screen); });
+  el('new-chat').onclick = () => pickMembers('New private room', 'Make room', true, (keys, name) => den.startPrivate(keys, name).then(go));
+  el('room-id').onclick = () => { if (phone.matches) toggleMembers(); };
+  // A swipe from a chat's left edge goes back, as in other chat apps.
+  let swipe = null;
+  el('den').addEventListener('touchstart', (e) => { const t = e.touches[0]; swipe = phone.matches && screen === 'chat' && t.clientX < 28 ? { x: t.clientX, y: t.clientY } : null; }, { passive: true });
+  el('den').addEventListener('touchend', (e) => { const t = e.changedTouches[0]; if (swipe && t.clientX - swipe.x > 80 && Math.abs(t.clientY - swipe.y) < 60) back(); swipe = null; }, { passive: true });
+  // The room's other actions, in a menu on a phone.
+  function closeMore() {
+    el('head-acts').classList.remove('open');
+    el('head-more').setAttribute('aria-expanded', 'false');
+  }
+  el('head-more').onclick = (e) => {
+    e.stopPropagation();
+    const open = !el('head-acts').classList.contains('open');
+    el('head-acts').classList.toggle('open', open);
+    el('head-more').setAttribute('aria-expanded', String(open));
+  };
+  document.addEventListener('click', closeMore);
+  phone.addEventListener('change', () => { drawDenHead(); fit(); });
+  show('list', true);
 
   // ---- Search, notifications -----------------------------------------------
 
@@ -999,7 +1090,7 @@ export function mountDen(den, el, me, apps = {}) {
     const n = new Notification(plain(roomTitle(room_)), opts);
     n.onclick = () => { window.focus(); go(room_); n.close(); };
   }
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && nearBottom()) { den.markRead(room); drawRooms(); } });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && nearBottom() && looking()) { den.markRead(room); drawRooms(); } });
 
   // ---- Voice -----------------------------------------------------------------
 
@@ -1267,7 +1358,7 @@ export function mountDen(den, el, me, apps = {}) {
     let v = el('den-app');
     if (v) return v;
     el('den-main').insertAdjacentHTML('afterend', `<section class="den-app" id="den-app" aria-label="Cashboard" hidden>
-      <header class="room-head"><button type="button" class="rooms-open" data-drawer aria-label="Rooms"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.5"/></svg></button><h2>Cashboard</h2></header>
+      <header class="room-head"><button type="button" class="rooms-open" data-back aria-label="Chats"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 2.5 4.5 8l5.5 5.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button><h2>Cashboard</h2></header>
       <div class="app-intro" id="app-intro">
         <ul class="facts-list">
           <li>Cashboard is a market board run by cashboard.live, not by this den. It opens here in its own frame: it sees this device's network address and what you do in it, never your rooms or words.</li>
@@ -1278,7 +1369,7 @@ export function mountDen(den, el, me, apps = {}) {
       </div>
     </section>`);
     v = el('den-app');
-    v.querySelector('[data-drawer]').onclick = () => el('den').classList.toggle('drawer');
+    v.querySelector('[data-back]').onclick = back;
     v.querySelector('[data-open]').onclick = () => { try { localStorage.setItem(SEEN, 'shown'); } catch { /* asked again next time */ } frameCashboard(); };
     return v;
   }
@@ -1299,7 +1390,7 @@ export function mountDen(den, el, me, apps = {}) {
   function openApp() {
     const v = appView();
     appOpen = true;
-    el('den').classList.remove('drawer');
+    show('chat', true);
     el('den-main').hidden = true;
     v.hidden = false;
     if (introSeen()) frameCashboard();
@@ -1344,7 +1435,7 @@ export function mountDen(den, el, me, apps = {}) {
   function drawDenHead() {
     const d = den.mod.den || {};
     const may = admin.sections().length > 0;
-    el('den-head').hidden = !d.name && !d.icon && !may;
+    el('den-head').hidden = !phone.matches && !d.name && !d.icon && !may;
     el('den-name').textContent = plain(d.name) || 'Epeaky';
     el('den-icon').innerHTML = d.icon ? `<img src="/door/icon?v=${encodeURIComponent(d.name || '')}" alt="" />` : esc((plain(d.name) || 'E').slice(0, 1));
     el('den-settings').hidden = !may;

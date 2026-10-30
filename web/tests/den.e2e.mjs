@@ -1,8 +1,9 @@
 // Epeaky in a real browser, its policy enforced: three people in by the three
 // ways a den opens (an invite link, the host's approval, the host's issuer
 // window registering a pass), then words, replies, reactions, edits, files,
-// rooms, private rooms, search and voice between two of them, and a board
-// shared from Cashboard (a stand-in for cashboard.live) through a room.
+// rooms, private rooms, search and voice between two of them, a board
+// shared from Cashboard (a stand-in for cashboard.live) through a room, and
+// the page on a phone.
 //
 //   (cd ../server && DEN_CASHBOARD='{"lifi":{"integrator":"epeaky","fee":0.005}}' mix phx.server)
 //                                      # the dev den: every way in open, Cashboard on
@@ -711,6 +712,41 @@ await A.p.click('[data-tab=audit]');
 ok(await until(A.p, () => /ban/.test(document.querySelector('#audit-list')?.textContent || '') && /timeout 600s/.test(document.querySelector('#audit-list')?.textContent || ''), null, 10000), 'the audit log shows the timeout and the ban');
 await shot(A.p, 'settings');
 await A.p.click('#settings [data-close]');
+
+// A phone: the chat list first, a chat full screen with a way back (its own
+// button, and the phone's back), settings on their own tab.
+{
+  const ctx = await b.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  const P = await ctx.newPage();
+  P.on('pageerror', (e) => errs.push(`P: ${e.message.slice(0, 200)}`));
+  P.on('console', (m) => { if (/Content Security Policy|Refused to/.test(m.text())) csp.push(`P: ${m.text().slice(0, 200)}`); });
+  await P.goto(`${DEN}/#invite=${host('IO.puts(hd(Den.Gate.Members.invite(1, 1)))')}`, { waitUntil: 'networkidle' });
+  ok(await inside(P), 'P is in, on a phone');
+  ok(await P.isVisible('#chats') && await P.isHidden('#den-main') && await P.isVisible('#tabs'), 'a phone opens on the chat list, with its tabs');
+  ok(await until(P, () => window.__den.inRoom('general'), null, 20000), 'P is in General');
+  await A.p.evaluate(() => window.__den.say('general', 'Phone check: the call moves to 15:00'));
+  ok(await until(P, () => /Phone check: the call moves to 15:00/.test(document.querySelector('#chats [data-room="general"] .chat-last')?.textContent || '') && document.querySelector('#chats [data-room="general"] .badge') && !document.querySelector('#tabs-unread').hidden, null, 20000), "General's row shows the latest words, their sender, and an unread count; so does the Chats tab");
+  ok(await P.evaluate(() => document.querySelector('#chats .chat')?.dataset.room) === 'general', 'the room with the latest message is first');
+  await P.click('#chats [data-room="general"]');
+  ok(await P.isVisible('#den-main') && await P.isHidden('#chats') && await P.isHidden('#tabs'), 'a chat takes the whole screen');
+  ok(await until(P, () => /Phone check/.test(document.querySelector('#log')?.textContent || ''), null, 10000), 'and shows the words');
+  ok(await until(P, async () => (await window.__den.glance('general')).unread === 0, null, 10000), 'opened, they are read');
+  await P.fill('#say-text', 'Seen, thanks');
+  await P.press('#say-text', 'Enter');
+  ok(await until(P, () => { const m = [...document.querySelectorAll('#log .msg.mine .msg-main')].at(-1); return m && /Seen, thanks/.test(m.textContent) && innerWidth - m.getBoundingClientRect().right < 16; }, null, 10000), 'its own words are a bubble on the right');
+  await P.click('#head-more');
+  ok(await P.isVisible('#room-meta'), "the room's other actions are in its menu");
+  await P.click('#rooms-open');
+  ok(await P.isVisible('#chats') && await P.isHidden('#den-main'), 'back goes to the chat list');
+  ok(/You: Seen, thanks/.test(await P.textContent('#chats [data-room="general"] .chat-last')), 'whose row now shows its own words');
+  await P.click('#chats [data-room="general"]');
+  await P.goBack();
+  ok(await until(P, () => document.querySelector('#chats').offsetParent !== null, null, 5000) && await P.isHidden('#den-main'), "so does the phone's own back");
+  await P.click('#tabs [data-screen="me"]');
+  ok(await P.isVisible('#forget') && await P.isVisible('#notify') && await P.isHidden('#chats'), 'settings are a tab of their own');
+  await shot(P, 'phone');
+  await ctx.close();
+}
 
 await A.p.screenshot({ path: `${SHOTS}/den-e2e-a.png` });
 await B.p.screenshot({ path: `${SHOTS}/den-e2e-b.png` });

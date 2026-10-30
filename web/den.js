@@ -1799,9 +1799,21 @@ export class DenClient {
   // ---- Unread ----------------------------------------------------------------
 
   async unread(room) {
-    const last = this.read[room] || 0;
-    // Words and files only: a line saying someone joined is not a message.
-    return (await this.log(room)).filter((m) => !m.mine && m.t !== 'note' && m.seq > last).length;
+    return (await this.glance(room)).unread;
+  }
+
+  /// A room in the chat list: how many messages are unread, and the latest one.
+  async glance(room) {
+    const from = this.read[room] || 0;
+    let unread = 0;
+    let last = null;
+    for (const m of await this.log(room)) {
+      // Words and files only: a line saying someone joined is not a message.
+      if (m.t === 'note') continue;
+      if (!m.mine && m.seq > from) unread++;
+      last = m;
+    }
+    return { unread, last };
   }
 
   lastRead(room) {

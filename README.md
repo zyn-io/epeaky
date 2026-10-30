@@ -46,7 +46,10 @@ you trust it with anything that matters.
   log. The den enforces all of it without reading a word.
 - **Installable**: the page installs to a phone's home screen or as a desktop
   app, and wakes with a notification when its page is closed: a push that
-  names the room, never the words.
+  names the room, never the words. On a phone it works as chat apps do: the
+  chat list first (latest words, unread counts), each chat full screen with
+  your own words on the right, back by button, swipe or the phone's back, and
+  settings on a tab of their own.
 - **Pins**: what a room wants every newcomer to know. A new member cannot
   read what came before it joined (forward secrecy); each pinner's device
   sends its pins again to whoever joins.

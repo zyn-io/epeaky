@@ -347,6 +347,24 @@ test("the den's own deletion is for open rooms: in a private room it is not take
   assert.equal(store.get('log:general')[0].deleted, true, 'a moderator of an open room still can');
 });
 
+test("the chat list's glance at a room: unread words and files from others, and the latest message, never a join line", async () => {
+  const { DenClient } = await import('../dist/den.js');
+  const log = [
+    { t: 'msg', id: 'a', seq: 3, text: 'read already' },
+    { t: 'msg', id: 'b', seq: 5, text: 'mine', mine: true },
+    { t: 'file', id: 'c', seq: 6, file: { name: 'notes.pdf' } },
+    { t: 'msg', id: 'd', seq: 7, text: 'latest' },
+    { t: 'note', id: 'e', seq: 8, text: 'Sam joined' },
+  ];
+  const den = Object.create(DenClient.prototype);
+  Object.assign(den, { read: { general: 4 }, kv: { get: async (k) => (k === 'log:general' ? log : undefined) } });
+  const g = await den.glance('general');
+  assert.equal(g.unread, 2);
+  assert.equal(g.last.id, 'd');
+  assert.equal(await den.unread('general'), 2);
+  assert.deepEqual(await den.glance('empty'), { unread: 0, last: null });
+});
+
 test("a push notification's words are the page's own: only the den's name and a room id come from the den", async () => {
   const { runInNewContext } = await import('node:vm');
   const src = await read('../sw.js');
