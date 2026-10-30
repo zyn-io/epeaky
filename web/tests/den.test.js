@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { execFileSync } from 'node:child_process';
 
 // The den's page (web/, built by build.sh into dist/ for these tests).
 const read = (p) => readFile(new URL(p, import.meta.url), 'utf8');
@@ -19,7 +20,7 @@ test('the page says what the server can see, inline, before anyone enters', asyn
 });
 
 test('the core page has nothing of the Cave or Zyn in it', async () => {
-  for (const f of ['../index.html', '../app.js', '../gate.js', '../passkey.js', '../base.css', '../den.css', '../config.json']) {
+  for (const f of ['../index.html', '../app.js', '../gate.js', '../passkey.js', '../cashboard.js', '../base.css', '../den.css', '../config.json']) {
     assert.doesNotMatch(await read(f), /cavebro|Cave|Zyn|Nap\b|Collection Z|Diggers|Lookouts|Lanterns/, f);
   }
 });
@@ -440,4 +441,10 @@ test("a screen frame opens only signed by the presenter's own key for that share
   const bent = signed.slice(); bent[20] ^= 1;
   await assert.rejects(verifyFrame(share.publicKey, bent), 'a changed byte: refused');
   await assert.rejects(verifyFrame(share.publicKey, new Uint8Array(10)), 'too short: refused');
+});
+
+test('every module of the page parses', () => {
+  for (const f of ['app.js', 'gate.js', 'passkey.js', 'cashboard.js', 'den.js', 'den-ui.js', 'den-admin.js', 'media-seal.js', 'voice-io.js', 'voice-worker.js', 'sw.js']) {
+    execFileSync(process.execPath, ['--check', new URL(`../${f}`, import.meta.url).pathname]);
+  }
 });

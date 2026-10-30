@@ -12,7 +12,7 @@ WEB=$(cd "$(dirname "$0")" && pwd)
 OUT=${1:-$WEB/../server/priv/page}
 ADDON=${2:-}
 rm -rf "$OUT" && mkdir -p "$OUT/den"
-cp "$WEB"/{index.html,base.css,den.css,app.js,gate.js,passkey.js,den.js,den-ui.js,den-admin.js,config.json} "$OUT/"
+cp "$WEB"/{index.html,base.css,den.css,app.js,gate.js,passkey.js,cashboard.js,den.js,den-ui.js,den-admin.js,config.json} "$OUT/"
 cp "$WEB"/{manifest.webmanifest,sw.js} "$OUT/"
 cp -R "$WEB/icons" "$OUT/icons"
 cp "$WEB/voice-worker.js" "$OUT/den/voice-worker.js"

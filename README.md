@@ -196,6 +196,7 @@ count the whole den as one client.
 | `DEN_ISSUER_LABEL` | the text of the button that opens it (default "Enter") |
 | `DEN_DONATE` | an https page where members can donate to the host; the den shows a link to it |
 | `DEN_DONATE_LABEL` | the link's text (default "Donate") |
+| `DEN_CASHBOARD` | turns on Cashboard as an app in the den, with the host's fee codes as JSON (below) |
 | `DEN_ROOMS` | the rooms every member sees, as `id:Title,…` (default `general:General`) |
 | `DEN_GATE` | another gate module, compiled in from `extra/` |
 | `DEN_EXTRA_CHILDREN` | processes an add-on starts, by module name |
@@ -260,6 +261,29 @@ styles, and write `config.json`:
 | `prefix` | the name this browser keeps the den's state under |
 | `issuer` | the page that lets members in (below) |
 | `issuerCode` | `true` if the issuer makes the pass code and sends it back (otherwise it gets only a hash) |
+
+### Cashboard
+
+[Cashboard](https://cashboard.live) is a market board: charts, watched
+wallets, perps, swaps. With `DEN_CASHBOARD` set, members find it under Apps
+in the room list, framed from cashboard.live in its own origin (the page's
+policy then allows `frame-src https://cashboard.live` and nothing else). The
+value is the host's fee codes, any of:
+
+```json
+{"jupiter": {"referralAccount": "…", "feeBps": 50},
+ "lifi": {"integrator": "your-name", "fee": 0.005},
+ "base": {"builderCode": "your_code"}}
+```
+
+or `{}` for none. Cashboard applies them within its own caps, shows each fee
+before a wallet signs, and runs swaps in a window of its own, where wallets
+work. A board a member shares from it goes to their room as a sealed file,
+after they confirm; members open it in Cashboard's review screen.
+
+Cashboard frames only the dens on its partner list: add your den's address
+with a pull request to [Cashboard](https://github.com/Story91/Cashboard)
+(`src/shared/hosts.ts` and `vercel.json`).
 
 ## Who gets in
 

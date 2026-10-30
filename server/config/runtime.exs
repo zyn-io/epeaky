@@ -69,6 +69,20 @@ if v = System.get_env("DEN_DONATE_LABEL") do
   config :den, donate_label: String.trim(v)
 end
 
+# Cashboard (https://cashboard.live) as an app inside the den, with the host's
+# own fee codes, as JSON: {"jupiter": {"referralAccount": ..., "feeBps": ...},
+# "lifi": {"integrator": ..., "fee": ...}, "base": {"builderCode": ...}}, any of
+# them, or {} for none. Cashboard applies them within its own caps, and only
+# for a den whose address is on its partner list.
+if v = System.get_env("DEN_CASHBOARD") do
+  codes = Jason.decode!(v)
+
+  (is_map(codes) and Enum.all?(codes, fn {k, c} -> k in ["jupiter", "lifi", "base"] and is_map(c) end)) ||
+    raise "DEN_CASHBOARD must be a JSON object with any of jupiter, lifi and base, each an object"
+
+  config :den, cashboard: codes
+end
+
 # Screen sharing in voice (Den.Voice.screen?/0, screen_bitrate/0).
 case System.get_env("DEN_SCREEN") do
   nil -> :ok

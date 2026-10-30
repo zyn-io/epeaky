@@ -39,7 +39,7 @@ const open = (session) => {
   document.querySelector('.ledger').hidden = true;
   document.querySelector('.register h1').hidden = true;
   el('den').hidden = false;
-  mountDen(den, el, me);
+  mountDen(den, el, me, { cashboard: config.cashboard && typeof config.cashboard === 'object' ? config.cashboard : null });
   den.connect(session);
 
 };

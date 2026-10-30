@@ -414,3 +414,8 @@ kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--line); 
 .task-for .id { margin-left: 5px; }
 .rule-rooms { display: grid; gap: 2px; padding-left: 22px; }
 .rule-head { margin: 8px 0 2px; font: 11px var(--sans); color: var(--muted); }
+
+/* Apps: Cashboard, framed in place of the room. */
+.den-app { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.den-app iframe { flex: 1; width: 100%; min-height: 0; border: 0; background: #fff; }
+.app-intro { display: grid; gap: 18px; justify-items: start; padding: 28px 24px; }

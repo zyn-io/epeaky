@@ -5,6 +5,7 @@
 import { REACTIONS as EMOJI, imageSize, inviteLink } from './den.js';
 import { mountAdmin, slowName } from './den-admin.js';
 import { passkeys, savePasskey } from './passkey.js';
+import { CASHBOARD_EMBED, boardFile, boardName, connectCashboard, isBoard } from './cashboard.js';
 const GROUP_MS = 5 * 60_000;
 // One line of text with nothing hidden in it: no bidirectional or zero-width
 // controls (which can make a name or a file name read backwards), and
@@ -69,10 +70,16 @@ const ICON = {
   pin: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2h4l-.5 4 2.5 2.5H4L6.5 6 6 2ZM8 8.5V14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
   del: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4h10M6 4V2.5h4V4M4.5 4l.7 9.5h5.6L11.5 4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
   file: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.5h5l3.5 3.5v9.5H4z M9 1.5V5h3.5" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>',
+  board: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4 11V8M7 11V5.5M10 11V7M13 11V4.5" stroke="currentColor" stroke-width="1.3"/></svg>',
 };
 
-export function mountDen(den, el, me) {
+/// `apps.cashboard`: the host's Cashboard settings ({ codes }), when it turned Cashboard on.
+export function mountDen(den, el, me, apps = {}) {
   let room = 'general';
+  // Cashboard: whether it is on screen, its connection once framed, and boards waiting for it.
+  let appOpen = false;
+  let cashboard = null;
+  const toOpen = [];
   let reply = null;
   // The next message is a task for this agent's key, when set.
   let taskFor = null;
@@ -195,8 +202,10 @@ export function mountDen(den, el, me) {
         ${open ? items.join('') || '<p class="none">None yet.</p>' : ''}
       </div>`);
     }
+    if (apps.cashboard) parts.push(`<div class="group"><p class="group-head"><span>Apps</span></p><button type="button" class="room" data-app="cashboard" aria-current="${appOpen}"><span class="room-name">Cashboard</span></button></div>`);
     el('rooms').innerHTML = parts.join('');
-    el('rooms').querySelectorAll('[data-room]').forEach((b) => { b.onclick = () => go(b.dataset.room); });
+    el('rooms').querySelectorAll('[data-room]').forEach((b) => { b.onclick = () => go(b.dataset.room); if (appOpen) b.setAttribute('aria-current', 'false'); });
+    el('rooms').querySelector('[data-app]')?.addEventListener('click', () => openApp());
     el('rooms').querySelectorAll('[data-join]').forEach((b) => { b.onclick = async () => { b.disabled = true; const r = await den.joinInvite(b.dataset.join); drawRooms(); if (r) go(r); }; });
     el('rooms').querySelectorAll('[data-decline]').forEach((b) => { b.onclick = async () => { await den.declineInvite(b.dataset.decline); drawRooms(); }; });
     el('rooms').querySelectorAll('[data-new]').forEach((b) => { b.onclick = () => (b.dataset.new === 'open' ? newRoom() : pickMembers('New private room', 'Make room', true, (keys, name) => den.startPrivate(keys, name).then(go))); });
@@ -243,6 +252,7 @@ export function mountDen(den, el, me) {
 
   function go(id, focus = null) {
     if (id !== room) { forgetImages(); drawn = 300; }
+    closeApp();
     room = id;
     reply = null;
     editing = null;
@@ -388,9 +398,12 @@ export function mountDen(den, el, me) {
     let body = `<div class="body">${words(m.text)}${m.edited && cont ? ' <span class="edited">edited</span>' : ''}</div>`;
     if (m.file) {
       const img = inlineImage(m.file);
+      const board = apps.cashboard && boardName(m.file);
       body = img
         ? `<button type="button" class="att" data-view="${esc(m.id)}" aria-label="Open ${esc(m.file.name)}"><img data-blob="${esc(m.id)}" alt="${esc(m.file.name)}" /></button>`
-        : `<button type="button" class="file" data-file="${esc(m.id)}">${ICON.file}<span><b>${esc(m.file.name)}</b><small>${size(m.file.size)} · Download</small></span></button>`;
+        : board
+          ? `<button type="button" class="file" data-board="${esc(m.id)}">${ICON.board}<span><b>${esc(board)}</b><small>Cashboard board · Open in Cashboard</small></span></button>`
+          : `<button type="button" class="file" data-file="${esc(m.id)}">${ICON.file}<span><b>${esc(m.file.name)}</b><small>${size(m.file.size)} · Download</small></span></button>`;
     }
     // A task: for whom, and where it stands, from that member's own reports.
     if (m.task) {
@@ -557,6 +570,7 @@ export function mountDen(den, el, me) {
     const m = li && shown.find((x) => x.id === li.dataset.id);
     if (t.dataset.jump) return flash(t.dataset.jump);
     if (t.dataset.file && m) return download(m);
+    if (t.dataset.board && m) return openBoard(m);
     if (t.dataset.view && m) return view(m);
     if (t.dataset.react) { closeEmoji(); return den.react(room, t.dataset.react, t.dataset.emoji).catch((err) => status(err.message)); }
     if (t.dataset.emoji && t.closest('.emoji') && m) { closeEmoji(); return den.react(room, m.id, t.dataset.emoji).catch((err) => status(err.message)); }
@@ -1242,6 +1256,86 @@ export function mountDen(den, el, me) {
       await den.forget();
       location.reload();
     };
+  }
+
+  // ---- Apps: Cashboard, framed, when the host turned it on -------------------------------
+
+  const SEEN = 'den.cashboard';
+  const introSeen = () => { try { return localStorage.getItem(SEEN) === 'shown'; } catch { return false; } };
+
+  function appView() {
+    let v = el('den-app');
+    if (v) return v;
+    el('den-main').insertAdjacentHTML('afterend', `<section class="den-app" id="den-app" aria-label="Cashboard" hidden>
+      <header class="room-head"><button type="button" class="rooms-open" data-drawer aria-label="Rooms"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.5"/></svg></button><h2>Cashboard</h2></header>
+      <div class="app-intro" id="app-intro">
+        <ul class="facts-list">
+          <li>Cashboard is a market board run by cashboard.live, not by this den. It opens here in its own frame: it sees this device's network address and what you do in it, never your rooms or words.</li>
+          <li>Swaps you make from it can carry a fee to this den's host. Cashboard shows each fee before your wallet signs.</li>
+          <li>A board you share from it goes to the room you were last in, as a file, after you confirm.</li>
+        </ul>
+        <button type="button" class="act" data-open>Open Cashboard</button>
+      </div>
+    </section>`);
+    v = el('den-app');
+    v.querySelector('[data-drawer]').onclick = () => el('den').classList.toggle('drawer');
+    v.querySelector('[data-open]').onclick = () => { try { localStorage.setItem(SEEN, 'shown'); } catch { /* asked again next time */ } frameCashboard(); };
+    return v;
+  }
+
+  function frameCashboard() {
+    const v = appView();
+    if (v.querySelector('iframe')) return;
+    el('app-intro').hidden = true;
+    const frame = Object.assign(document.createElement('iframe'), { src: CASHBOARD_EMBED, title: 'Cashboard', referrerPolicy: 'no-referrer' });
+    // Its own origin, its own popups (swaps open in a window of their own, where wallets work), never this page's address bar.
+    frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-forms');
+    frame.setAttribute('allow', 'clipboard-write');
+    v.append(frame);
+    cashboard = connectCashboard({ frame, codes: apps.cashboard.codes || {}, onShare: shareBoard });
+    while (toOpen.length) cashboard.load(toOpen.shift());
+  }
+
+  function openApp() {
+    const v = appView();
+    appOpen = true;
+    el('den').classList.remove('drawer');
+    el('den-main').hidden = true;
+    v.hidden = false;
+    if (introSeen()) frameCashboard();
+    drawRooms();
+  }
+
+  function closeApp() {
+    if (!appOpen) return;
+    appOpen = false;
+    el('den-app').hidden = true;
+    el('den-main').hidden = false;
+  }
+
+  /// A board a member shared from Cashboard: into the room they were last in, as a sealed file, once they say so.
+  async function shareBoard({ board, name }) {
+    const r = den.rooms.get(room);
+    const where = title(r) || room;
+    if (!den.inRoom(room)) { status(`This device is not in ${where} yet.`); return; }
+    if (!(await ask({ heading: `Share “${name || 'Board'}” to ${where}?`, text: "Members of this room can open it in Cashboard. Widget titles, notes and labels are in it; wallet addresses, holdings and positions are not.", yes: 'Share' }))) return;
+    try {
+      await den.sendFile(room, boardFile(board, name));
+      status(`Shared to ${where}.`);
+    } catch (e) { status(e.message); }
+  }
+
+  /// A shared board from a room: opened here, then on Cashboard's own review screen.
+  async function openBoard(m) {
+    status(`Opening ${boardName(m.file)}…`, true);
+    try {
+      const board = (await (await den.openFile(m.file)).text()).trim();
+      if (!isBoard(board)) throw new Error('That file is not a Cashboard board.');
+      openApp();
+      if (cashboard) cashboard.load(board);
+      else toOpen.push(board);
+      status('');
+    } catch (e) { status(e.message); }
   }
 
   // ---- The den itself: its name and icon, and its settings ------------------------------

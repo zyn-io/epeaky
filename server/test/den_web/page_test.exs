@@ -75,6 +75,22 @@ defmodule DenWeb.PageTest do
     assert Map.has_key?(config, "prefix")
   end
 
+  test "Cashboard is offered only when the host turned it on, with the host's codes, and only then may the page frame it", %{conn: conn} do
+    plain = get(conn, "/")
+    [csp] = get_resp_header(plain, "content-security-policy")
+    refute csp =~ "frame-src"
+    refute Map.has_key?(Jason.decode!(get(build_conn(), "/config.json").resp_body), "cashboard")
+
+    codes = %{"lifi" => %{"integrator" => "epeaky", "fee" => 0.005}, "base" => %{"builderCode" => "epeaky"}}
+    Application.put_env(:den, :cashboard, codes)
+    on_exit(fn -> Application.delete_env(:den, :cashboard) end)
+
+    [csp] = get_resp_header(get(build_conn(), "/"), "content-security-policy")
+    assert csp =~ "frame-src https://cashboard.live;"
+    assert csp =~ "frame-ancestors 'none'"
+    assert Jason.decode!(get(build_conn(), "/config.json").resp_body)["cashboard"] == %{"codes" => codes}
+  end
+
   test "the policy names the den's socket and the extra origins" do
     assert DenWeb.Page.csp("chat.example.org", ["https://keys.example.org"]) =~
              "connect-src 'self' wss://chat.example.org https://keys.example.org;"

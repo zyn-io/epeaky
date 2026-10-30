@@ -5,7 +5,9 @@ defmodule DenWeb.Page do
   own scripts and wasm, reaches only this den and the origins in
   `:page_connect` (where the day keys are published, say), and allows the
   microphone for voice. No extension or third-party script runs where the
-  keys are kept.
+  keys are kept. When the host turns on Cashboard (`:cashboard`, its fee
+  codes), the page may also frame https://cashboard.live, which runs in its
+  own origin and never sees the keys.
   """
   @behaviour Plug
   import Plug.Conn
@@ -43,7 +45,8 @@ defmodule DenWeb.Page do
         "issuer" => Application.get_env(:den, :issuer),
         "issuerLabel" => Application.get_env(:den, :issuer_label),
         "donate" => Application.get_env(:den, :donate),
-        "donateLabel" => Application.get_env(:den, :donate_label)
+        "donateLabel" => Application.get_env(:den, :donate_label),
+        "cashboard" => with(%{} = codes <- Application.get_env(:den, :cashboard), do: %{"codes" => codes})
       }
       |> Map.reject(fn {_, v} -> is_nil(v) end)
 
@@ -57,8 +60,10 @@ defmodule DenWeb.Page do
 
   def call(conn, static), do: Plug.Static.call(secure(conn), static)
 
-  @doc "The page's policy, for this den's host and the extra origins it may reach."
-  def csp(host, extra) do
+  @cashboard "https://cashboard.live"
+
+  @doc "The page's policy, for this den's host and the extra origins it may reach; `frames` are the sites it may frame."
+  def csp(host, extra, frames \\ []) do
     ws = if host in ["localhost", "127.0.0.1"], do: "ws://#{host}:*", else: "wss://#{host}"
 
     Enum.join(
@@ -72,18 +77,22 @@ defmodule DenWeb.Page do
         "media-src 'self' blob:",
         "font-src 'self'",
         "connect-src " <> Enum.join(["'self'", ws | extra], " "),
+        frames != [] && "frame-src " <> Enum.join(frames, " "),
         "base-uri 'none'",
         "form-action 'none'",
         "frame-ancestors 'none'",
         "object-src 'none'"
-      ],
+      ]
+      |> Enum.filter(& &1),
       "; "
     )
   end
 
+  defp frames, do: if(Application.get_env(:den, :cashboard), do: [@cashboard], else: [])
+
   defp secure(conn) do
     conn
-    |> put_resp_header("content-security-policy", csp(conn.host, Application.get_env(:den, :page_connect, [])))
+    |> put_resp_header("content-security-policy", csp(conn.host, Application.get_env(:den, :page_connect, []), frames()))
     |> put_resp_header("permissions-policy", "geolocation=(), microphone=(self), camera=(), payment=()")
     |> put_resp_header("x-frame-options", "DENY")
     |> put_resp_header("x-content-type-options", "nosniff")

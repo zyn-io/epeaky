@@ -1,9 +1,11 @@
 // Epeaky in a real browser, its policy enforced: three people in by the three
 // ways a den opens (an invite link, the host's approval, the host's issuer
 // window registering a pass), then words, replies, reactions, edits, files,
-// rooms, private rooms, search and voice between two of them.
+// rooms, private rooms, search and voice between two of them, and a board
+// shared from Cashboard (a stand-in for cashboard.live) through a room.
 //
-//   (cd ../server && mix phx.server)   # the dev den: every way in open
+//   (cd ../server && DEN_CASHBOARD='{"lifi":{"integrator":"epeaky","fee":0.005}}' mix phx.server)
+//                                      # the dev den: every way in open, Cashboard on
 //   ./build.sh ../server/priv/page      # its page
 //   node tests/den.e2e.mjs            (CHROMIUM=… for another Chrome)
 import { createRequire } from 'node:module';
@@ -67,8 +69,17 @@ async function until(p, f, arg, ms = 30000) {
   }
   return false;
 }
+// A stand-in for Cashboard at /embed: says ready, keeps what the den sends it,
+// and shares a board when told to, as Cashboard's partner mode does.
+const CASHBOARD_STUB = `<!doctype html><title>Cashboard</title><body>board<script>
+  window.got = [];
+  addEventListener('message', (e) => { if (e.source === parent) window.got.push({ origin: e.origin, data: e.data }); });
+  window.share = (board, name) => parent.postMessage({ proto: 'cashboard-host/1', t: 'share-board', board, name }, '*');
+  parent.postMessage({ proto: 'cashboard-host/1', t: 'ready' }, '*');
+</script>`;
 async function person(name, url) {
   const ctx = await b.newContext({ viewport: { width: 1300, height: 900 }, permissions: ['microphone'] });
+  await ctx.route('https://cashboard.live/**', (r) => r.fulfill({ contentType: 'text/html', body: CASHBOARD_STUB }));
   const p = await ctx.newPage();
   await p.addInitScript(() => { navigator.mediaDevices.getUserMedia = async () => { const ac = new AudioContext(); const o = ac.createOscillator(); const d = ac.createMediaStreamDestination(); o.connect(d); o.start(); return d.stream; }; });
   // A screen to share: a canvas whose colour changes every second (red, green, blue).
@@ -239,6 +250,40 @@ await A.p.evaluate(async () => {
 ok(await until(B.p, () => [...document.querySelectorAll('#log .att img')].some((i) => i.src.startsWith('blob:') && i.naturalWidth === 40)), 'B sees the image, decrypted in the browser');
 const doc = await B.p.evaluate(async () => { const log = await window.__den.log('general'); const f = log.find((m) => m.file?.name === 'minutes.txt'); return (await window.__den.openFile(f.file)).text(); });
 ok(doc === 'the minutes of the first meeting', 'B opens the document');
+
+// Cashboard, an app the host turned on: it says who runs it before it loads,
+// is greeted with the host's codes, and a board shared from it reaches the room
+// as a sealed file, once the member says so; another member opens it there.
+const cashboardOf = (p) => p.frames().find((f) => f.url().startsWith('https://cashboard.live/embed'));
+// What the stand-in Cashboard in p's frame was sent, once `pick` finds it there.
+async function cashboardGot(p, pick, ms = 15000) {
+  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 250))) {
+    const got = await cashboardOf(p)?.evaluate(() => window.got).catch(() => null);
+    const hit = got?.find(pick);
+    if (hit) return hit;
+  }
+  return null;
+}
+const hostCodes = (await A.p.evaluate(() => fetch('/config.json').then((r) => r.json()))).cashboard?.codes;
+ok(!!hostCodes, 'the den offers Cashboard with the codes its host set');
+await A.p.click('[data-app="cashboard"]');
+ok(await A.p.isVisible('#app-intro') && (await A.p.locator('#den-app iframe').count()) === 0 && !cashboardOf(A.p), 'before Cashboard loads, the den says who runs it and what it sees');
+await A.p.click('#app-intro [data-open]');
+const hello = await cashboardGot(A.p, (m) => m.data?.t === 'hello');
+ok(await A.p.isHidden('#den-main') && !!cashboardOf(A.p), 'Cashboard opens in a frame in place of the room');
+ok(hello?.data?.t === 'hello' && hello.data.partner === 'epeaky' && JSON.stringify(hello.data.codes) === JSON.stringify(hostCodes) && hello.data.features?.trade === false && hello.origin === DEN, `the den greets Cashboard with its host's codes, trading off (${JSON.stringify(hello?.data)})`);
+await cashboardOf(A.p).evaluate(() => window.share('1AbCdEf_-9', 'Perps desk'));
+ok(await until(A.p, () => document.querySelector('#ask')?.open && /Share “Perps desk” to General\?/.test(document.querySelector('#ask h2').textContent)), 'sharing a board from Cashboard asks first, naming the room');
+await A.p.click('#ask [data-yes]');
+ok(await until(B.p, () => [...document.querySelectorAll('#log [data-board]')].some((x) => /Perps desk/.test(x.textContent))), 'B sees the board in General, as a Cashboard board');
+await A.p.click('[data-room="general"]');
+ok(await A.p.isVisible('#log') && await A.p.isHidden('#den-app'), 'a room in the list brings the conversation back');
+await B.p.click('#log [data-board]');
+ok(await until(B.p, () => { const i = document.querySelector('#app-intro'); return !!i && !i.hidden && !document.querySelector('#den-app').hidden; }), 'B, opening it, is told about Cashboard first too');
+await B.p.click('#app-intro [data-open]');
+const loaded = await cashboardGot(B.p, (m) => m.data?.t === 'load-board');
+ok(loaded?.data?.board === '1AbCdEf_-9' && loaded.origin === DEN, 'the board opens in B\'s Cashboard, to its review screen');
+await B.p.click('[data-room="general"]');
 // A file of several pieces, past the old 25 MB limit's pieces logic: 30 MB.
 const bigSum = await A.p.evaluate(async () => {
   const data = new Uint8Array(30 * 1024 * 1024);

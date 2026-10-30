@@ -323,6 +323,19 @@ den. With pushes for private rooms only, those are small rooms: their
 members are the easier to tell. A member who does not want this keeps
 notifications to while the page is open.
 
+## Apps
+
+A host may turn on Cashboard (`DEN_CASHBOARD`), framed from
+https://cashboard.live, the only site the page's policy then lets it frame.
+It runs in its own origin, so it cannot read the page that holds the keys,
+the rooms or the words; it sees the device's network address and what the
+member does in it. The page loads it only after the member is told this, and
+talks with it only through messages from that frame and origin
+(`cashboard.js`): the den sends the host's fee codes and the boards a member
+opens, and takes only boards a member shares, which go to a room as a sealed
+file after the member confirms. Cashboard, not the den, decides the fees,
+within its own caps, and shows them before a wallet signs.
+
 ## What the operator can see
 
 - device keys and which rooms each one is in, private rooms included, and
